@@ -24,3 +24,4 @@ The source-specific registry entries are intentionally marked `provisional`
 until representative files and publisher data dictionaries are available. The
 store refuses to ingest a provisional dataset instead of guessing offsets,
 units, sentinel meanings, time zones, or quality rules.
+

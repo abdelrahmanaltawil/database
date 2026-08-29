@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-data-store"
+version = "0.1.0"
+description = "A provenance-first, multi-domain research data store"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Abdelrahman Altawil"}]
+dependencies = [
+  "duckdb>=1.1",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pyarrow>=17",
+]
+
+[project.optional-dependencies]
+netcdf = ["xarray>=2024.7", "netcdf4>=1.7"]
+dev = ["pytest>=8.3", "pytest-cov>=5"]
+
+[project.scripts]
+research-store = "research_store.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_store"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

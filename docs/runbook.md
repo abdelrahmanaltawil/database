@@ -1,0 +1,169 @@
+# Runbook
+
+These commands go from an empty machine directory to an initialized and tested
+store. They do not put research data in the Git repository.
+
+## 1. Install
+
+```bash
+git clone https://github.com/abdelrahmanaltawil/database.git
+cd database
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]'
+```
+
+Install NetCDF support only on machines that ingest reanalysis:
+
+```bash
+python -m pip install -e '.[netcdf]'
+```
+
+## 2. Select exactly one store root
+
+Choose a local, non-cloud-synchronized disk with adequate capacity:
+
+```bash
+export RESEARCH_DATA_ROOT=/absolute/path/to/research-data
+```
+
+Put that export in the shell profile used by every analysis repository. Do not
+set repository-relative paths.
+
+## 3. Initialize and verify
+
+```bash
+research-store init
+research-store doctor
+research-store datasets
+python -m pytest
+```
+
+The initial real-source registry entries report `provisional`. This is an
+intentional stop condition, not an installation failure.
+
+## 4. Resolve source declarations
+
+For each source, obtain a representative file and the publisher's data
+dictionary. Edit only:
+
+```text
+src/research_store/foundation/registry.py
+```
+
+Record the evidence in the entry while resolving:
+
+- exact field names or fixed-width offsets and scale;
+- every element/column to canonical variable, quantity, unit and float64 type;
+- source timezone, interval duration and whether timestamps label starts/ends;
+- quality codes and exact era-aware sentinel rules;
+- coordinate reference system and longitude convention;
+- append versus whole-archive replacement delivery; and
+- the approved grid target registry and sampling decision.
+
+Change `readiness` to `READY` only when all unresolved items are removed. Add a
+small licensed or synthetic regression fixture and run:
+
+```bash
+python -m pytest
+```
+
+## 5. Ingest immutable sources
+
+All source formats use the same command. Examples:
+
+```bash
+research-store ingest weather_family_a /download/archive-2019.txt \
+  --source-uri 'https://publisher.example/archive-2019.txt' \
+  --publisher-vintage '2019 annual release' \
+  --fetched-at '2026-08-29T12:00:00Z'
+
+research-store ingest hydrometric_flow_daily /download/hydrometric.sqlite \
+  --publisher-vintage '2026-Q3'
+
+research-store ingest hydrometric_level_daily /download/hydrometric.sqlite \
+  --publisher-vintage '2026-Q3'
+
+research-store ingest station_inventory /download/stations.csv
+research-store ingest reanalysis_points_hourly /download/reanalysis.nc
+research-store ingest wind_scada_10min /secure/scada.csv
+```
+
+The two hydrometric commands intentionally reuse one physical file. Its raw
+SHA-256 object is stored once, while the catalogue records two dataset-specific
+ingestion runs.
+
+If a command is interrupted, run the identical command again. Completed chunk
+keys are reused and a partial snapshot remains invisible.
+
+## 6. Verify provenance and measured cost
+
+```bash
+research-store provenance weather_family_a
+
+research-store benchmark weather_family_a \
+  --entity '0100001' \
+  --year 2019 \
+  --variable precipitation_amount
+```
+
+Record benchmark JSON when changing entity bucket counts or fragment sizes.
+
+## 7. Read from Python
+
+```python
+from research_store import load
+
+rain = load(
+    "weather_family_a",
+    entity="0100001",
+    variable="precipitation_amount",
+    start="2015",
+    end="2020",       # exclusive
+)
+
+snapshot_used = rain.attrs["snapshot_id"]
+units = rain.attrs["units"]
+```
+
+Publication workflows should record `snapshot_id`. Passing it back to `load`
+reproduces the same fragment manifest after later ingestions.
+
+## 8. Use SQL
+
+```bash
+research-store sql \
+  'SELECT entity_id, time_start, power FROM wind_scada_10min LIMIT 20'
+```
+
+Or from Python:
+
+```python
+from research_store import connect
+
+with connect() as sql:
+    observations = sql.execute(
+        "SELECT * FROM wind_scada_10min WHERE entity_id = ?",
+        ["T07"],
+    ).fetchdf()
+    sources = sql.execute(
+        "SELECT * FROM catalog.main.source_files"
+    ).fetchdf()
+```
+
+Dataset views keep variables in separate columns. Catalogue tables are attached
+read-only under `catalog.main`.
+
+## 9. Backup
+
+Back up these durable directories together:
+
+```text
+$RESEARCH_DATA_ROOT/raw
+$RESEARCH_DATA_ROOT/catalog
+```
+
+The warehouse is rebuildable, but do not delete it until a complete regeneration
+has been tested from the backed-up raw objects and catalogue metadata.
+
