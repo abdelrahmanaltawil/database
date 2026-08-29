@@ -20,3 +20,6 @@ locks/
 *.nc
 *.sqlite
 
+# Licensed source mappings must remain local.
+config/private_registry.json
+config/private_registry.local.json

@@ -25,8 +25,9 @@ flowchart TD
     FND --> STORE[Raw, Parquet and DuckDB]
 ```
 
-The foundation owns configuration, the registry, schemas, conventions,
-partitioning, hashing, the catalogue, checkpoints and the only Parquet writer.
+The foundation owns configuration, the public registry, private overlay
+resolution, schemas, conventions, partitioning, hashing, the catalogue,
+checkpoints and the only Parquet writer.
 An ingester parses one external format and emits canonical Arrow chunks. A
 derived producer emits the same chunks but records parent snapshots and its
 query. The access layer reads committed catalogue entries only.
@@ -35,7 +36,7 @@ query. The access layer reads committed catalogue entries only.
 
 - the foundation imports access, ingestion or derived code;
 - an ingestion module imports another ingestion module or the access layer;
-- a dataset is declared outside `foundation/registry.py`; or
+- a public dataset is declared outside `foundation/registry.py`; or
 - Parquet is written outside `foundation/writer.py`.
 
 The CLI is the composition root and is the only layer allowed to import the
@@ -107,6 +108,25 @@ foundation writer instead validates their schema and injects catalogue-owned
 source and producer-run identifiers before publication. SQL clients attach the
 catalogue read-only and expose only logical dataset views.
 
+Climate observations and `station_inventory` deliberately use the same string
+`entity_id`: the ECCC Climate ID. Numeric and alphanumeric values are both
+preserved, so an observation can be joined directly to its station metadata.
+
+## Public and private source configuration
+
+Public publisher formats and canonical meanings are declared in
+`foundation/registry.py`. Licensed source column names and other protected
+metadata must not enter Git history. `RESEARCH_STORE_PRIVATE_REGISTRY` may point
+to a JSON overlay outside the repository. An overlay may refine an existing
+dataset's variables, units, source timezone, timestamp semantics and ingestion
+options; it cannot invent a new public dataset identifier.
+
+The resolved private values participate in `registry_hash`. Consequently, a
+mapping or unit change creates a different ingestion identity even when the raw
+file is unchanged. The resolved JSON is recorded only in the local DuckDB
+catalogue. The private overlay must be backed up with the catalogue but never
+committed to a public repository.
+
 ## Idempotency, checkpoints and publication
 
 An external run is uniquely identified by:
@@ -175,11 +195,13 @@ measurements. No size or timing estimate has been invented from filenames.
 
 ## Decisions deliberately unresolved
 
-The initial source entries are `provisional`; ingestion is blocked until real
-samples and publisher documentation settle offsets, units, time semantics,
-quality codes and sentinel rules. The store also does not decide which
+The station inventory is ready. Remaining source entries are `provisional`;
+ingestion is blocked until the listed unresolved decisions are closed. For the
+national ECCC hourly files, the fixed-width positions, scale, element codes,
+missing marker and interval slots are resolved, but station-specific local
+standard time still requires an evidence-backed UTC policy. The store also does
+not decide which
 overlapping instrument is the analysis series, whether cross-source entities
 are identical, or whether a grid is sampled at a point or aggregated over an
 area. Candidate relationships and evidence belong in the store; acceptance is
 an explicit research decision.
-

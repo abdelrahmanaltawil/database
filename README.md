@@ -20,8 +20,9 @@ The repository contains code only. Data lives below the directory selected by
 `RESEARCH_DATA_ROOT`; see [the runbook](docs/runbook.md) for setup and ingestion
 commands.
 
-The source-specific registry entries are intentionally marked `provisional`
-until representative files and publisher data dictionaries are available. The
-store refuses to ingest a provisional dataset instead of guessing offsets,
-units, sentinel meanings, time zones, or quality rules.
-
+The ECCC fixed-width layouts and station workbook are source-configured. The
+station inventory is ready to ingest; the national hourly series remain
+`provisional` until station-specific local-standard-time handling is declared.
+Licensed SCADA mappings live in a private JSON overlay outside Git. The store
+refuses to ingest a provisional dataset instead of guessing time zones, units,
+missing markers, or confidential column meanings.

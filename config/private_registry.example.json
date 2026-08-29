@@ -1,0 +1,45 @@
+{
+  "weather_family_a": {
+    "source_timezone": "<verified fixed standard timezone>",
+    "ingest_options": {
+      "entity_allowlist": [
+        "<climate id>"
+      ]
+    },
+    "unresolved_decisions": [
+      "verify the selected stations all use the declared fixed standard timezone",
+      "verify the production file contains only the declared element"
+    ],
+    "readiness": "provisional"
+  },
+  "wind_scada_10min": {
+    "source_timezone": "<verified source timezone>",
+    "timestamp_semantics": "<interval_start or interval_end>",
+    "variables": [
+      {
+        "name": "power",
+        "quantity": "active power",
+        "unit": "<documented unit>"
+      },
+      {
+        "name": "wind_speed",
+        "quantity": "wind speed",
+        "unit": "<documented unit>"
+      }
+    ],
+    "ingest_options": {
+      "format": "csv",
+      "entity_column": "<licensed source column>",
+      "timestamp_column": "<licensed source column>",
+      "column_map": {
+        "power": "<licensed source column>",
+        "wind_speed": "<licensed source column>"
+      },
+      "na_values": []
+    },
+    "unresolved_decisions": [
+      "replace every placeholder with documented private source metadata"
+    ],
+    "readiness": "provisional"
+  }
+}

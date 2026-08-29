@@ -40,19 +40,42 @@ research-store datasets
 python -m pytest
 ```
 
-The initial real-source registry entries report `provisional`. This is an
-intentional stop condition, not an installation failure.
+The station inventory reports `ready`. Sources with unresolved time, unit or
+licensed-schema decisions report `provisional`; this is an intentional stop
+condition, not an installation failure.
 
-## 4. Resolve source declarations
+## 4. Ingest the station relationship table
 
-For each source, obtain a representative file and the publisher's data
-dictionary. Edit only:
+The supplied ECCC workbook has three disclaimer rows followed by the real
+header. The ingester detects that header and preserves numeric and alphanumeric
+Climate IDs as strings:
+
+```bash
+research-store ingest station_inventory \
+  '/absolute/path/to/Station Inventory EN.xlsx' \
+  --publisher-vintage '2025-01-02 snapshot'
+```
+
+Climate observations use the same `entity_id`, so this workbook is the direct
+relational station lookup.
+
+## 5. Resolve public and licensed source declarations
+
+Public, non-sensitive declarations are edited in:
 
 ```text
 src/research_store/foundation/registry.py
 ```
 
-Record the evidence in the entry while resolving:
+Licensed mappings must not be written there. Copy the placeholder structure:
+
+```bash
+cp config/private_registry.example.json /absolute/private/path/registry.json
+export RESEARCH_STORE_PRIVATE_REGISTRY=/absolute/private/path/registry.json
+```
+
+Keep that file outside Git and restrict its permissions. Record the evidence
+while resolving:
 
 - exact field names or fixed-width offsets and scale;
 - every element/column to canonical variable, quantity, unit and float64 type;
@@ -62,14 +85,20 @@ Record the evidence in the entry while resolving:
 - append versus whole-archive replacement delivery; and
 - the approved grid target registry and sampling decision.
 
-Change `readiness` to `READY` only when all unresolved items are removed. Add a
-small licensed or synthetic regression fixture and run:
+Change `readiness` to `ready` only when every placeholder and unresolved item is
+removed. For licensed sources, tests committed to Git must use synthetic names
+and values. Run:
 
 ```bash
 python -m pytest
 ```
 
-## 5. Ingest immutable sources
+For the all-Canada ECCC hourly archive, do not assign one timezone to every
+station. The source uses local standard time. Either supply an evidence-backed
+station timezone policy or curate a declared station allowlist whose members
+share one fixed standard-time offset.
+
+## 6. Ingest immutable sources
 
 All source formats use the same command. Examples:
 
@@ -85,7 +114,6 @@ research-store ingest hydrometric_flow_daily /download/hydrometric.sqlite \
 research-store ingest hydrometric_level_daily /download/hydrometric.sqlite \
   --publisher-vintage '2026-Q3'
 
-research-store ingest station_inventory /download/stations.csv
 research-store ingest reanalysis_points_hourly /download/reanalysis.nc
 research-store ingest wind_scada_10min /secure/scada.csv
 ```
@@ -97,7 +125,14 @@ ingestion runs.
 If a command is interrupted, run the identical command again. Completed chunk
 keys are reused and a partial snapshot remains invisible.
 
-## 6. Verify provenance and measured cost
+The climate IDs currently map as follows:
+
+| Dataset | Publisher record | Element | Canonical variable |
+|---|---|---:|---|
+| `weather_family_a` | ECCC HLY01 RCS | 262 | `precipitation_amount` in mm |
+| `weather_family_b` | ECCC HLY03 | 123 | `precipitation_amount` in mm |
+
+## 7. Verify provenance and measured cost
 
 ```bash
 research-store provenance weather_family_a
@@ -110,7 +145,7 @@ research-store benchmark weather_family_a \
 
 Record benchmark JSON when changing entity bucket counts or fragment sizes.
 
-## 7. Read from Python
+## 8. Read from Python
 
 ```python
 from research_store import load
@@ -130,7 +165,7 @@ units = rain.attrs["units"]
 Publication workflows should record `snapshot_id`. Passing it back to `load`
 reproduces the same fragment manifest after later ingestions.
 
-## 8. Use SQL
+## 9. Use SQL
 
 ```bash
 research-store sql \
@@ -155,7 +190,16 @@ with connect() as sql:
 Dataset views keep variables in separate columns. Catalogue tables are attached
 read-only under `catalog.main`.
 
-## 9. Backup
+Join precipitation to the station workbook using the shared string Climate ID:
+
+```sql
+SELECT p.entity_id, s.station_name, s.latitude, s.longitude,
+       p.time_start, p.precipitation_amount
+FROM weather_family_b AS p
+JOIN station_inventory AS s USING (entity_id)
+```
+
+## 10. Backup
 
 Back up these durable directories together:
 
@@ -164,6 +208,8 @@ $RESEARCH_DATA_ROOT/raw
 $RESEARCH_DATA_ROOT/catalog
 ```
 
+Also back up the private registry overlay named by
+`RESEARCH_STORE_PRIVATE_REGISTRY`. Never add it to a public Git repository.
+
 The warehouse is rebuildable, but do not delete it until a complete regeneration
 has been tested from the backed-up raw objects and catalogue metadata.
-

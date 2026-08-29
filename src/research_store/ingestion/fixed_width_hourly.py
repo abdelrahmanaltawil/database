@@ -12,7 +12,7 @@ from research_store.foundation.conventions import apply_sentinel
 from research_store.foundation.models import DatasetSpec
 from research_store.foundation.pipeline import ParsedChunk, ingest_file
 
-VERSION = "1"
+VERSION = "2"
 
 
 def _slice(value: Any, name: str) -> slice:
@@ -54,24 +54,53 @@ def parse(
         raise ValueError("source_timezone must be resolved in the registry")
     field_width = int(options.get("field_width", 7))
     value_width = int(options.get("value_width", 6))
+    expected_width = int(values_start) + 24 * field_width
+    configured_entities = options.get("entity_allowlist", [])
+    if not isinstance(configured_entities, (list, tuple, set)):
+        raise TypeError("entity_allowlist must be a list of station identifiers")
+    entity_allowlist = {str(value) for value in configured_entities}
 
     rows: list[dict[str, Any]] = []
     batch_start = 1
+    record_count = 0
     with path.open(
         "rt", encoding=str(options.get("encoding", "ascii")), newline=""
     ) as stream:
         for line_number, line in enumerate(stream, start=1):
-            entity = line[station_slice]
+            record = line.rstrip("\r\n")
+            if not record:
+                continue
+            if len(record) == expected_width - 1:
+                # Some exports omit the final blank quality flag.
+                record += " "
+            elif len(record) < expected_width:
+                raise ValueError(
+                    f"Truncated fixed-width record on line {line_number}: "
+                    f"expected {expected_width} characters, got {len(record)}"
+                )
+            elif len(record) > expected_width:
+                overflow = record[expected_width:]
+                if overflow.strip():
+                    raise ValueError(
+                        f"Unexpected data after position {expected_width} "
+                        f"on line {line_number}"
+                    )
+                record = record[:expected_width]
+
+            entity = record[station_slice]
             if entity != entity.strip():
                 entity = entity.strip()
             if not entity:
                 raise ValueError(f"Missing station identifier on line {line_number}")
+            if entity_allowlist and entity not in entity_allowlist:
+                continue
+            record_count += 1
             day = pd.to_datetime(
-                line[date_slice],
+                record[date_slice],
                 format=str(options.get("date_format", "%Y%m%d")),
                 errors="raise",
             )
-            element = line[element_slice].strip()
+            element = record[element_slice].strip()
             try:
                 variable = element_map[element]
             except KeyError as error:
@@ -80,8 +109,8 @@ def parse(
                 ) from error
             for hour in range(24):
                 offset = int(values_start) + hour * field_width
-                raw_value = line[offset : offset + value_width]
-                quality = line[offset + value_width : offset + field_width]
+                raw_value = record[offset : offset + value_width]
+                quality = record[offset + value_width : offset + field_width].strip()
                 local_start = day + pd.Timedelta(hours=hour)
                 aware_start = local_start.tz_localize(
                     spec.source_timezone, ambiguous="raise", nonexistent="raise"
@@ -100,22 +129,22 @@ def parse(
                         "quality_flag": quality,
                     }
                 )
-            if line_number % lines_per_batch == 0:
+            if record_count % lines_per_batch == 0:
                 frame = _canonical_frame(rows, spec)
                 yield from chunks_from_frame(
                     frame,
                     spec,
-                    key_prefix=f"lines={batch_start}-{line_number}",
+                    key_prefix=f"records={batch_start}-{record_count}",
                     completed=completed,
                 )
                 rows.clear()
-                batch_start = line_number + 1
+                batch_start = record_count + 1
         if rows:
             frame = _canonical_frame(rows, spec)
             yield from chunks_from_frame(
                 frame,
                 spec,
-                key_prefix=f"lines={batch_start}-{line_number}",
+                key_prefix=f"records={batch_start}-{record_count}",
                 completed=completed,
             )
 

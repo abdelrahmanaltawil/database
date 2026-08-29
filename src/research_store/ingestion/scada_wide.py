@@ -13,7 +13,7 @@ from research_store.foundation.conventions import utc_timestamps
 from research_store.foundation.models import DatasetSpec
 from research_store.foundation.pipeline import ParsedChunk, ingest_file
 
-VERSION = "1"
+VERSION = "2"
 
 
 def _frames(path: Path, options: dict[str, Any] | Any) -> Iterator[pd.DataFrame]:
@@ -87,9 +87,17 @@ def parse(path: Path, spec: DatasetSpec, completed: set[str]) -> Iterable[Parsed
             canonical[spec.time_end_field] = labelled
         for target, source_name in column_map.items():
             if target in spec.variable_names:
-                canonical[target] = pd.to_numeric(
-                    source[source_name], errors="raise"
-                ).astype("float64")
+                variable = spec.variable(target)
+                if variable.dtype == "float64":
+                    canonical[target] = pd.to_numeric(
+                        source[source_name], errors="raise"
+                    ).astype("float64")
+                elif variable.dtype == "string":
+                    canonical[target] = source[source_name].astype("string")
+                else:
+                    raise TypeError(
+                        f"Unsupported SCADA dtype for {target}: {variable.dtype}"
+                    )
             else:
                 canonical[target] = source[source_name].astype("string")
         yield from chunks_from_frame(

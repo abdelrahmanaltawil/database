@@ -5,7 +5,11 @@ import pyarrow as pa
 import pytest
 
 from research_store.foundation.models import Registry
-from research_store.foundation.registry import DEFAULT_REGISTRY
+from research_store.foundation.registry import (
+    BASE_REGISTRY,
+    DEFAULT_REGISTRY,
+    load_registry,
+)
 from research_store.foundation.schema import validate_table
 
 
@@ -45,6 +49,43 @@ def test_every_required_source_has_one_registry_entry() -> None:
 def test_provisional_sources_refuse_ingestion() -> None:
     with pytest.raises(RuntimeError, match="provisional"):
         DEFAULT_REGISTRY.get("wind_scada_10min").require_ready()
+
+
+def test_station_inventory_is_resolved() -> None:
+    DEFAULT_REGISTRY.get("station_inventory").require_ready()
+
+
+def test_private_registry_overlay_is_local_and_changes_identity(tmp_path) -> None:
+    private = tmp_path / "private.json"
+    private.write_text(
+        """
+        {
+          "wind_scada_10min": {
+            "source_timezone": "UTC",
+            "timestamp_semantics": "interval_end",
+            "variables": [
+              {"name": "power", "quantity": "active power", "unit": "kW"},
+              {"name": "wind_speed", "quantity": "wind speed", "unit": "m/s"}
+            ],
+            "ingest_options": {
+              "format": "csv",
+              "entity_column": "private_entity",
+              "timestamp_column": "private_time",
+              "column_map": {
+                "power": "private_power",
+                "wind_speed": "private_wind"
+              }
+            },
+            "unresolved_decisions": [],
+            "readiness": "ready"
+          }
+        }
+        """
+    )
+    resolved = load_registry(private)
+    resolved.get("wind_scada_10min").require_ready()
+    assert BASE_REGISTRY.get("wind_scada_10min").readiness.value == "provisional"
+    assert resolved.digest != BASE_REGISTRY.digest
 
 
 def test_duplicate_dataset_declarations_fail(wide_spec) -> None:

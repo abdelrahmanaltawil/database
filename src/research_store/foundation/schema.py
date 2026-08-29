@@ -61,7 +61,10 @@ def validate_table(table: pa.Table, spec: DatasetSpec) -> None:
     declared = {variable.name: variable for variable in spec.variables}
     if spec.storage_model is StorageModel.LONG:
         variable_field = _require_field(table, "variable")
-        if not pa.types.is_string(variable_field.type):
+        if not (
+            pa.types.is_string(variable_field.type)
+            or pa.types.is_large_string(variable_field.type)
+        ):
             raise TypeError("Long-form variable identifiers must be strings")
         value_field = _require_field(table, "value")
         if not pa.types.is_float64(value_field.type):
