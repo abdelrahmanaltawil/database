@@ -218,7 +218,16 @@ class StoreWriter:
             prior_fragments: list[Path] = []
             if spec.snapshot_mode == "append":
                 try:
-                    _, prior = self.catalog.committed_fragments(spec.dataset_id)
+                    staged = self.catalog.staged_chunks(run.run_id)
+                    partitions = [json.loads(row[2]) for row in staged]
+                    partition_filter = {
+                        key: {partition[key] for partition in partitions}
+                        for key in spec.partition_keys
+                    }
+                    _, prior = self.catalog.committed_fragments(
+                        spec.dataset_id,
+                        partition_filter=partition_filter,
+                    )
                     prior_fragments = [Path(path) for path in prior]
                 except LookupError:
                     pass
@@ -264,11 +273,16 @@ class StoreWriter:
             "'" + path.replace("'", "''") + "'" for path in fragments
         )
         query = (
-            f"SELECT {', '.join(quoted)}, count(*) AS occurrences "
+            "SELECT count(*) FROM ("
+            f"SELECT {', '.join(quoted)} "
             f"FROM read_parquet([{path_values}], union_by_name=true) "
             f"GROUP BY {', '.join(quoted)} HAVING count(*) > 1 LIMIT 3"
+            ") AS duplicate_groups"
         )
         with duckdb.connect() as connection:
-            duplicates = connection.execute(query).fetchall()
-        if duplicates:
-            raise ValueError(f"Duplicate observation keys across chunks: {duplicates}")
+            duplicate_groups = connection.execute(query).fetchone()[0]
+        if duplicate_groups:
+            raise ValueError(
+                f"Duplicate observation keys across chunks: "
+                f"{duplicate_groups} sampled groups"
+            )

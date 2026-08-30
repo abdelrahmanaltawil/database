@@ -1,9 +1,9 @@
 # Runbook
 
-These commands go from an empty machine directory to an initialized and tested
-store. They do not put research data in the Git repository.
+These commands initialize and ingest the ECCC research store without putting
+research data in Git.
 
-## 1. Install
+## 1. Install or update
 
 ```bash
 git clone https://github.com/abdelrahmanaltawil/database.git
@@ -14,147 +14,109 @@ python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 ```
 
-Install NetCDF support only on machines that ingest reanalysis:
+For an existing clone, replace the clone and environment-creation steps with:
 
 ```bash
-python -m pip install -e '.[netcdf]'
+cd ~/Developer/database
+git pull origin main
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
 ```
 
-## 2. Select exactly one store root
-
-Choose a local, non-cloud-synchronized disk with adequate capacity:
+## 2. Select the local store
 
 ```bash
-export RESEARCH_DATA_ROOT=/absolute/path/to/research-data
-```
-
-Put that export in the shell profile used by every analysis repository. Do not
-set repository-relative paths.
-
-## 3. Initialize and verify
-
-```bash
+export RESEARCH_DATA_ROOT=/Users/abdelrahmanaltawil/ResearchDataStore
 research-store init
 research-store doctor
 research-store datasets
-python -m pytest
 ```
 
-The station inventory reports `ready`. Sources with unresolved time, unit or
-licensed-schema decisions report `provisional`; this is an intentional stop
-condition, not an installation failure.
+`research-store datasets` should list exactly the three ready ECCC datasets.
+The old hydrometric, reanalysis, and SCADA declarations are not active.
 
-## 4. Ingest the station relationship table
-
-The supplied ECCC workbook has three disclaimer rows followed by the real
-header. The ingester detects that header and preserves numeric and alphanumeric
-Climate IDs as strings:
+## 3. Ingest the station relationship table
 
 ```bash
 research-store ingest eccc_station_inventory \
   '/absolute/path/to/Station Inventory EN.xlsx' \
-  --publisher-vintage '2025-01-02 snapshot'
+  --publisher-vintage '2025 snapshot'
 ```
 
-Climate observations use the same `entity_id`, so this workbook is the direct
-relational station lookup. The ingester also derives an IANA timezone from each
-station's coordinates and records the timezone boundary package version.
-Stores created before the ECCC naming migration must run this command again
-under `eccc_station_inventory`; the immutable workbook object is deduplicated by
-SHA-256.
+The ingester preserves numeric and alphanumeric Climate IDs as strings, derives
+an IANA timezone from each station's coordinates, and records the exact timezone
+boundary and rule-package versions. Observation rows use the same `entity_id`,
+so they join directly to station metadata.
 
-## 5. Resolve public and licensed source declarations
+## 4. Ingest All Canada HLY01 files
 
-Public, non-sensitive declarations are edited in:
+Point to the `All Canada/Data/Original/Text` directory. Do not point to the
+separate Hamilton or Toronto directories. Hamilton and Toronto station IDs
+inside the All Canada files remain included.
 
-```text
-src/research_store/foundation/registry.py
-```
-
-Licensed mappings must not be written there. Copy the placeholder structure:
+Test one file first:
 
 ```bash
-cp config/private_registry.example.json /absolute/private/path/registry.json
-export RESEARCH_STORE_PRIVATE_REGISTRY=/absolute/private/path/registry.json
+ECCC_DIR='/absolute/path/to/precipitation/All Canada/Data/Original/Text'
+
+caffeinate -i research-store ingest eccc_hly01_observations \
+  "$ECCC_DIR/HLY01_RCS_P2004" \
+  --publisher-vintage 'ECCC HLY01 archive'
 ```
 
-Keep that file outside Git and restrict its permissions. Record the evidence
-while resolving:
-
-- exact field names or fixed-width offsets and scale;
-- every element/column to canonical variable, quantity, unit and float64 type;
-- source timezone, interval duration and whether timestamps label starts/ends;
-- quality codes and exact era-aware sentinel rules;
-- coordinate reference system and longitude convention;
-- append versus whole-archive replacement delivery; and
-- the approved grid target registry and sampling decision.
-
-Change `readiness` to `ready` only when every placeholder and unresolved item is
-removed. For licensed sources, tests committed to Git must use synthetic names
-and values. Run:
+After it returns a `snap_...` identifier, ingest every matching file in filename
+order:
 
 ```bash
-python -m pytest
+caffeinate -i research-store ingest-directory eccc_hly01_observations \
+  "$ECCC_DIR" \
+  --pattern 'HLY01_RCS_P*' \
+  --publisher-vintage 'ECCC HLY01 archive'
 ```
 
-For the all-Canada ECCC hourly archive, the source uses local standard time. The
-ingester uses each station's IANA timezone from `eccc_station_inventory`, removes
-the daylight-saving component, and converts the standard-time interval to UTC.
-It stops if an observation's Climate ID has no station timezone.
+The command prints progress as `[current/total]`. Already committed identical
+files return their existing snapshot, and interrupted files reuse completed
+checkpoints when the same command is rerun.
 
-## 6. Ingest immutable sources
-
-All source formats use the same command. Examples:
+If HLY03 production files are available, ingest them separately with their
+actual filename pattern:
 
 ```bash
-research-store ingest eccc_hly01_observations /download/HLY01_RCS_P2019 \
-  --source-uri 'https://publisher.example/archive-2019.txt' \
-  --publisher-vintage '2019 annual release' \
-  --fetched-at '2026-08-29T12:00:00Z'
-
-research-store ingest hydrometric_flow_daily /download/hydrometric.sqlite \
-  --publisher-vintage '2026-Q3'
-
-research-store ingest hydrometric_level_daily /download/hydrometric.sqlite \
-  --publisher-vintage '2026-Q3'
-
-research-store ingest reanalysis_points_hourly /download/reanalysis.nc
-research-store ingest wind_scada_10min /secure/scada.csv
+research-store ingest-directory eccc_hly03_observations \
+  '/absolute/path/to/HLY03/Text' \
+  --pattern 'HLY03*' \
+  --publisher-vintage 'ECCC HLY03 archive'
 ```
 
-The two hydrometric commands intentionally reuse one physical file. Its raw
-SHA-256 object is stored once, while the catalogue records two dataset-specific
-ingestion runs.
-
-If a command is interrupted, run the identical command again. Completed chunk
-keys are reused and a partial snapshot remains invisible.
-
-The configured ECCC source elements currently map as follows:
+## 5. Registered ECCC elements
 
 | Dataset | Elements | Canonical variables |
 |---|---|---|
-| `eccc_hly01_observations` | 262-280 | Hourly/15-minute precipitation, gauge weight, 2 m wind and snow depth |
+| `eccc_hly01_observations` | 262-280 | Hourly/15-minute precipitation, gauge weight, 2 m wind, and snow depth |
 | `eccc_hly03_observations` | 123 | `precipitation_amount_1h` in mm |
 
-The physical long table retains `source_element`. Each element declaration owns
-its scale, unit and interval placement. Register additional documented HLY01
-elements, such as temperature, in the same dataset before ingesting a file that
-contains them; undeclared codes stop ingestion.
+The long physical table retains `source_element`. Each declaration owns its
+scale, unit, and interval placement. Add any documented ECCC temperature or
+other climate element to the same HLY dataset before ingesting files containing
+it; an undeclared code intentionally stops ingestion.
 
-## 7. Verify provenance and measured cost
+## 6. Verify
 
 ```bash
 research-store provenance eccc_hly01_observations
 
-research-store benchmark eccc_hly01_observations \
-  --entity '0100001' \
-  --year 2019 \
-  --variable precipitation_amount_1h
+research-store sql \
+  'SELECT count(*) AS rows, min(time_start) AS first_utc, max(time_end) AS last_utc FROM eccc_hly01_observations'
 ```
 
-Record benchmark JSON when changing entity bucket counts or fragment sizes.
+Join observations to their relational station record:
 
-## 8. Read from Python
+```bash
+research-store sql \
+  'SELECT p.entity_id, s.station_name, s.latitude, s.longitude, p.time_start, p.precipitation_amount_1h FROM eccc_hly01_observations AS p JOIN eccc_station_inventory AS s USING (entity_id) LIMIT 20'
+```
+
+From Python:
 
 ```python
 from research_store import load
@@ -171,42 +133,7 @@ snapshot_used = rain.attrs["snapshot_id"]
 units = rain.attrs["units"]
 ```
 
-Publication workflows should record `snapshot_id`. Passing it back to `load`
-reproduces the same fragment manifest after later ingestions.
-
-## 9. Use SQL
-
-```bash
-research-store sql \
-  'SELECT entity_id, time_start, power FROM wind_scada_10min LIMIT 20'
-```
-
-Or from Python:
-
-```python
-from research_store import connect
-
-with connect() as sql:
-    observations = sql.execute(
-        "SELECT * FROM wind_scada_10min WHERE entity_id = ?",
-        ["T07"],
-    ).fetchdf()
-    sources = sql.execute("SELECT * FROM catalog.main.source_files").fetchdf()
-```
-
-Dataset views keep variables in separate columns. Catalogue tables are attached
-read-only under `catalog.main`.
-
-Join precipitation to the station workbook using the shared string Climate ID:
-
-```sql
-SELECT p.entity_id, s.station_name, s.latitude, s.longitude,
-       p.time_start, p.precipitation_amount_1h
-FROM eccc_hly03_observations AS p
-JOIN eccc_station_inventory AS s USING (entity_id)
-```
-
-## 10. Backup
+## 7. Backup
 
 Back up these durable directories together:
 
@@ -214,9 +141,6 @@ Back up these durable directories together:
 $RESEARCH_DATA_ROOT/raw
 $RESEARCH_DATA_ROOT/catalog
 ```
-
-Also back up the private registry overlay named by
-`RESEARCH_STORE_PRIVATE_REGISTRY`. Never add it to a public Git repository.
 
 The warehouse is rebuildable, but do not delete it until a complete regeneration
 has been tested from the backed-up raw objects and catalogue metadata.

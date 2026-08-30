@@ -156,6 +156,34 @@ def test_eccc_standard_time_policy_ignores_daylight_saving(tmp_path: Path) -> No
     assert starts.loc[7].hour == 5
 
 
+def test_eccc_standard_time_policy_handles_inuvik_dst_boundaries(
+    tmp_path: Path,
+) -> None:
+    records = [
+        _hourly_record("2202578", "20040404", "262", [0] * 24),
+        _hourly_record("2202578", "20041031", "262", [0] * 24),
+    ]
+    source = tmp_path / "HLY01_RCS_P2004"
+    source.write_text("\n".join(records) + "\n", encoding="ascii")
+
+    chunks = list(
+        fixed_width_hourly.parse(
+            source,
+            DEFAULT_REGISTRY.get("eccc_hly01_observations"),
+            set(),
+            timezone_by_entity={"2202578": "America/Inuvik"},
+        )
+    )
+    frame = pa.concat_tables([chunk.table for chunk in chunks]).to_pandas()
+
+    durations = frame["time_end"] - frame["time_start"]
+    assert (durations == pd.Timedelta(hours=1)).all()
+    fall_last = frame.loc[
+        frame["time_start"] == pd.Timestamp("2004-11-01T06:00:00Z")
+    ].iloc[0]
+    assert fall_last["time_end"] == pd.Timestamp("2004-11-01T07:00:00Z")
+
+
 def test_station_inventory_xlsx_with_disclaimers_and_alphanumeric_ids(
     tmp_path: Path,
 ) -> None:

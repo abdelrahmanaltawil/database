@@ -274,6 +274,33 @@ def test_append_snapshots_are_cumulative_and_replace_snapshots_preserve_vintages
         registry=registry,
     )
     assert current["power"].tolist() == [1.0, 3.0]
+    with Catalog(store_paths).open(read_only=True) as connection:
+        fragment_counts = dict(
+            connection.execute(
+                """
+                SELECT snapshot_id, count(*)
+                FROM fragments
+                WHERE snapshot_id IN (?, ?)
+                GROUP BY snapshot_id
+                """,
+                [append_first, append_second],
+            ).fetchall()
+        )
+    assert fragment_counts == {append_first: 1, append_second: 1}
+    append_provenance = Catalog(store_paths).provenance(
+        append_spec.dataset_id, append_second
+    )
+    assert {record["original_name"] for record in append_provenance} == {
+        "annual-2023",
+        "annual-2024",
+    }
+    with pytest.raises(ValueError, match="Duplicate observation keys"):
+        ingest_rows(
+            append_spec,
+            "annual-2024-duplicate",
+            [("A", "2024-01-01T00:00:00Z", 9.0, 10.0)],
+            "v1",
+        )
 
     replace_first = ingest_rows(
         replace_spec, "quarterly-old", [("A", "2024-01-01T00:00:00Z", 5.0, 6.0)], "v1"

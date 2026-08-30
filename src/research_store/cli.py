@@ -17,18 +17,12 @@ from research_store.foundation.paths import (
 from research_store.foundation.registry import DEFAULT_REGISTRY
 from research_store.ingestion import (
     fixed_width_hourly,
-    hydrometric_sqlite,
     inventory_csv,
-    reanalysis_netcdf,
-    scada_wide,
 )
 
 INGESTERS = {
     "fixed_width_hourly": fixed_width_hourly.ingest,
-    "hydrometric_sqlite": hydrometric_sqlite.ingest,
     "inventory_csv": inventory_csv.ingest,
-    "reanalysis_netcdf": reanalysis_netcdf.ingest,
-    "scada_wide": scada_wide.ingest,
 }
 
 
@@ -58,6 +52,7 @@ def _ingest(args: argparse.Namespace) -> int:
     paths = _paths(args, for_write=True)
     spec = DEFAULT_REGISTRY.get(args.dataset)
     ingester = INGESTERS[spec.producer]
+    print(f"ingesting {args.source} ...", file=sys.stderr, flush=True)
     snapshot = ingester(
         args.dataset,
         args.source,
@@ -68,6 +63,38 @@ def _ingest(args: argparse.Namespace) -> int:
         fetched_at=args.fetched_at,
     )
     print(snapshot)
+    return 0
+
+
+def _ingest_directory(args: argparse.Namespace) -> int:
+    paths = _paths(args, for_write=True)
+    spec = DEFAULT_REGISTRY.get(args.dataset)
+    ingester = INGESTERS[spec.producer]
+    directory = args.directory.expanduser().resolve(strict=True)
+    if not directory.is_dir():
+        raise ValueError(f"Source is not a directory: {directory}")
+    sources = sorted(path for path in directory.glob(args.pattern) if path.is_file())
+    if not sources:
+        raise FileNotFoundError(
+            f"No files in {directory} match pattern {args.pattern!r}"
+        )
+    total = len(sources)
+    for number, source in enumerate(sources, start=1):
+        print(
+            f"[{number}/{total}] ingesting {source.name} ...",
+            file=sys.stderr,
+            flush=True,
+        )
+        snapshot = ingester(
+            args.dataset,
+            source,
+            registry=DEFAULT_REGISTRY,
+            paths=paths,
+            source_uri=None,
+            publisher_vintage=args.publisher_vintage,
+            fetched_at=None,
+        )
+        print(f"{source.name}\t{snapshot}", flush=True)
     return 0
 
 
@@ -171,6 +198,15 @@ def parser() -> argparse.ArgumentParser:
     ingest.add_argument("--publisher-vintage")
     ingest.add_argument("--fetched-at")
     ingest.set_defaults(handler=_ingest)
+    ingest_directory = subparsers.add_parser(
+        "ingest-directory",
+        help="ingest matching immutable source files in filename order",
+    )
+    ingest_directory.add_argument("dataset")
+    ingest_directory.add_argument("directory", type=Path)
+    ingest_directory.add_argument("--pattern", required=True)
+    ingest_directory.add_argument("--publisher-vintage")
+    ingest_directory.set_defaults(handler=_ingest_directory)
     provenance = subparsers.add_parser(
         "provenance", help="resolve sources for a snapshot"
     )

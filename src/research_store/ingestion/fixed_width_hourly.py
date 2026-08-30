@@ -16,9 +16,9 @@ from research_store.foundation.conventions import apply_sentinel
 from research_store.foundation.models import DatasetSpec, Registry
 from research_store.foundation.paths import StorePaths, resolve_store_paths
 from research_store.foundation.pipeline import ParsedChunk, ingest_file
-from research_store.foundation.timezones import pinned_zoneinfo
+from research_store.foundation.timezones import standard_offset_history
 
-VERSION = "3"
+VERSION = "4"
 
 
 def _slice(value: Any, name: str) -> slice:
@@ -97,18 +97,18 @@ def _standard_offset(
     timezone_name: str,
     cache: dict[tuple[str, object], timedelta],
 ) -> timedelta:
-    key = (timezone_name, local.date())
-    if key in cache:
-        return cache[key]
     try:
-        zone = pinned_zoneinfo(timezone_name)
+        history = standard_offset_history(timezone_name)
     except ZoneInfoNotFoundError as error:
         raise ValueError(f"Unknown station timezone {timezone_name!r}") from error
-    aware = local.to_pydatetime().replace(tzinfo=zone, fold=0)
-    utc_offset = aware.utcoffset()
-    if utc_offset is None:
-        raise ValueError(f"Timezone {timezone_name!r} has no UTC offset")
-    standard = utc_offset - (aware.dst() or timedelta(0))
+    local_datetime = local.to_pydatetime()
+    cache_component: object = local.date()
+    if local.date() in history.transition_dates:
+        cache_component = local_datetime
+    key = (timezone_name, cache_component)
+    if key in cache:
+        return cache[key]
+    standard = history.offset_at(local_datetime)
     cache[key] = standard
     return standard
 

@@ -25,7 +25,7 @@ flowchart TD
     FND --> STORE[Raw, Parquet and DuckDB]
 ```
 
-The foundation owns configuration, the public registry, private overlay
+The foundation owns configuration, the ECCC registry, optional local overlay
 resolution, schemas, conventions, partitioning, hashing, the catalogue,
 checkpoints and the only Parquet writer.
 An ingester parses one external format and emits canonical Arrow chunks. A
@@ -76,13 +76,13 @@ cloud-synchronization directory names.
 The registry permits two physical representations:
 
 - **long**, for sparse element/value sources; and
-- **wide**, for synchronized dense sources such as turbine SCADA.
+- **wide**, retained as a validated foundation capability for future documented
+  sources.
 
 `load()` exposes one logical form: entity and interval keys followed by
 variable-named columns. Different quantities never share a generic `value`
-column in the returned dataframe. This gives SCADA its efficient natural form
-without making analysis code learn a second API. Long Parquet is pivoted only
-after entity, time and variable filtering.
+column in the returned dataframe. Long Parquet is pivoted only after entity,
+time and variable filtering.
 
 Every variable has one quantity, unit, Arrow type and optional quality field in
 the registry. Numeric research values remain float64. Entity identifiers must
@@ -126,20 +126,16 @@ The timezone polygon data package is pinned. Its installed version is stored in
 each station row, so a future boundary-data update is an explicit ingester and
 registry change rather than a silent reinterpretation of historical timestamps.
 
-## Public and private source configuration
+## Source configuration
 
 Public publisher formats and canonical meanings are declared in
-`foundation/registry.py`. Licensed source column names and other protected
-metadata must not enter Git history. `RESEARCH_STORE_PRIVATE_REGISTRY` may point
-to a JSON overlay outside the repository. An overlay may refine an existing
-dataset's variables, units, source timezone, timestamp semantics and ingestion
-options; it cannot invent a new public dataset identifier.
+`foundation/registry.py`. `RESEARCH_STORE_PRIVATE_REGISTRY` may optionally point
+to a local JSON overlay. An overlay can refine an existing dataset but cannot
+invent a new public dataset identifier.
 
-The resolved private values participate in `registry_hash`. Consequently, a
-mapping or unit change creates a different ingestion identity even when the raw
-file is unchanged. The resolved JSON is recorded only in the local DuckDB
-catalogue. The private overlay must be backed up with the catalogue but never
-committed to a public repository.
+Resolved values participate in `registry_hash`. Consequently, a mapping or unit
+change creates a different ingestion identity even when the raw file is
+unchanged.
 
 ## Idempotency, checkpoints and publication
 
@@ -165,9 +161,11 @@ leaves an unreferenced directory that readers cannot see; rerunning completes
 the catalogue transaction. Readers never glob staging or arbitrary output
 directories.
 
-Append datasets inherit the preceding committed fragment manifest. Replacement
-datasets, such as a refreshed whole-archive delivery, create an independent
-snapshot. Old snapshots remain queryable by ID.
+Append datasets reference the preceding committed snapshot as their manifest
+parent. Readers recursively resolve those parents without copying old fragment
+rows into every annual snapshot. Duplicate validation scans new fragments and
+only prior fragments in overlapping year/entity-bucket partitions. Replacement
+datasets create an independent snapshot. Old snapshots remain queryable by ID.
 
 ## Partitioning and query cost
 
@@ -198,21 +196,18 @@ measurements. No size or timing estimate has been invented from filenames.
 | Numeric sentinels | Source adapter applies registered rules before Arrow conversion |
 | Sentinel meaning changes | Inclusive-start/exclusive-end era rules; overlaps and uncovered eras fail |
 | Numeric-looking identifiers | String schema required before publication |
-| 30 February after unpivot | Calendar arithmetic drops impossible day slots; invalid year/month raises |
 | Longitude conventions | Explicit conversion to signed EPSG:4326; unknown convention raises |
-| Local/DST/UTC confusion | ECCC station coordinates resolve to IANA zones; the historical standard offset is used and DST is removed before conversion to UTC |
+| Local/DST/UTC confusion | ECCC station coordinates resolve to pinned IANA zones; explicit TZif standard types are used instead of Python's inferred `dst()` value |
 | Different sampling frequencies | Native frequency remains registry metadata; no ingestion resampling |
 | float64 narrowed to float32 | Writer schema validation rejects float32 |
 | Cloud-synchronized root | Resolver and `doctor` warn |
 | Empty/partial producer output | Empty chunks fail and only committed catalogue fragments are readable |
 | Duplicate observations | Keys are checked within chunks and across the full published snapshot |
 
-## Decisions deliberately unresolved
+## Current scope
 
-The ECCC station inventory and HLY01/HLY03 declarations are ready. Remaining
-source entries are `provisional`; ingestion is blocked until their listed
-unresolved decisions are closed. The store still does not decide which
-overlapping instrument is the analysis series, whether cross-source entities
-are identical, or whether a grid is sampled at a point or aggregated over an
-area. Candidate relationships and evidence belong in the store; acceptance is
-an explicit research decision.
+The active registry contains only the ready ECCC station inventory and
+HLY01/HLY03 declarations. Hydrometric, reanalysis, and offshore SCADA sources
+are outside the current project scope. New documented ECCC climate elements,
+including temperature, belong in the existing HLY product declaration with
+their source code, unit, scale, timing, and quality semantics.

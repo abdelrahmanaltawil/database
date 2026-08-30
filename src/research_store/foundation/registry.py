@@ -1,8 +1,7 @@
-"""Canonical public declarations plus an optional private source overlay.
+"""Canonical ECCC declarations plus an optional local source overlay.
 
-The public declarations contain non-sensitive dataset semantics. Licensed or
-confidential source column names belong in a JSON overlay outside the Git
-repository. Producers and readers consume the same resolved registry.
+Producers and readers consume the same resolved registry. An optional overlay
+can refine an existing declaration without creating undeclared dataset IDs.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from research_store.foundation.models import (
     VariableSpec,
 )
 
-_PROVISIONAL = DatasetReadiness.PROVISIONAL
 PRIVATE_REGISTRY_ENV = "RESEARCH_STORE_PRIVATE_REGISTRY"
 
 
@@ -292,65 +290,6 @@ BASE_REGISTRY = Registry(
             },
         ),
         DatasetSpec(
-            dataset_id="hydrometric_flow_daily",
-            description="Daily discharge values unpivoted from the national SQLite archive",
-            kind=DatasetKind.EXTERNAL,
-            producer="hydrometric_sqlite",
-            storage_model=StorageModel.WIDE,
-            temporal_kind=TemporalKind.INTERVAL,
-            native_frequency="1 day",
-            snapshot_mode="replace",
-            variables=(
-                VariableSpec(
-                    "discharge",
-                    "volumetric flow rate",
-                    "m3/s",
-                    quality_field="discharge_quality",
-                ),
-            ),
-            readiness=_PROVISIONAL,
-            ingest_options={
-                "table": None,
-                "station_column": None,
-                "year_column": None,
-                "month_column": None,
-                "value_prefix": None,
-                "quality_prefix": None,
-            },
-            unresolved_decisions=(
-                "confirm SQLite table and column names",
-                "record quality-symbol meanings and source daily-time semantics",
-            ),
-        ),
-        DatasetSpec(
-            dataset_id="hydrometric_level_daily",
-            description="Daily stage values unpivoted from the national SQLite archive",
-            kind=DatasetKind.EXTERNAL,
-            producer="hydrometric_sqlite",
-            storage_model=StorageModel.WIDE,
-            temporal_kind=TemporalKind.INTERVAL,
-            native_frequency="1 day",
-            snapshot_mode="replace",
-            variables=(
-                VariableSpec(
-                    "stage", "water level", "m", quality_field="stage_quality"
-                ),
-            ),
-            readiness=_PROVISIONAL,
-            ingest_options={
-                "table": None,
-                "station_column": None,
-                "year_column": None,
-                "month_column": None,
-                "value_prefix": None,
-                "quality_prefix": None,
-            },
-            unresolved_decisions=(
-                "confirm SQLite table and column names",
-                "record quality-symbol meanings and source daily-time semantics",
-            ),
-        ),
-        DatasetSpec(
             dataset_id="eccc_station_inventory",
             description="Versioned ECCC station inventory workbook",
             kind=DatasetKind.REFERENCE,
@@ -424,53 +363,6 @@ BASE_REGISTRY = Registry(
                 "source_longitude_convention": "signed",
                 "derive_timezone_from_coordinates": True,
             },
-        ),
-        DatasetSpec(
-            dataset_id="reanalysis_points_hourly",
-            description="Hourly reanalysis extracted from a rotated-pole grid at approved targets",
-            kind=DatasetKind.EXTERNAL,
-            producer="reanalysis_netcdf",
-            storage_model=StorageModel.WIDE,
-            temporal_kind=TemporalKind.INTERVAL,
-            native_frequency="1 hour",
-            variables=(),
-            readiness=_PROVISIONAL,
-            ingest_options={
-                "sampling_method": None,
-                "target_registry": None,
-                "variable_map": {},
-            },
-            unresolved_decisions=(
-                "declare variables, units, and NetCDF coordinate names",
-                "choose point sampling or area aggregation and preserve its evidence",
-                "approve the target point or polygon registry",
-            ),
-        ),
-        DatasetSpec(
-            dataset_id="wind_scada_10min",
-            description="Offshore turbine SCADA in its naturally dense wide representation",
-            kind=DatasetKind.EXTERNAL,
-            producer="scada_wide",
-            storage_model=StorageModel.WIDE,
-            temporal_kind=TemporalKind.INTERVAL,
-            native_frequency="10 minutes",
-            source_timezone=None,
-            variables=(
-                VariableSpec("power", "active power", None),
-                VariableSpec("wind_speed", "wind speed", None),
-            ),
-            readiness=_PROVISIONAL,
-            ingest_options={
-                "format": None,
-                "entity_column": None,
-                "timestamp_column": None,
-                "column_map": {},
-            },
-            unresolved_decisions=(
-                "confirm file format and all approximately 34 columns with units",
-                "record timestamp timezone, interval labelling, and DST behaviour",
-                "record meanings of missing, invalid, and not-installed sensor fields",
-            ),
         ),
     ]
 )

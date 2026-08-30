@@ -476,51 +476,6 @@ class Catalog:
                         """,
                         [snapshot_id, parent_snapshot_id],
                     )
-                    parent_fragments = connection.execute(
-                        """
-                        SELECT fragment_id, relative_path, partition_json, row_count,
-                               content_sha256, source_id, min_time, max_time
-                        FROM fragments WHERE snapshot_id = ?
-                        """,
-                        [parent_snapshot_id],
-                    ).fetchall()
-                    for (
-                        parent_fragment_id,
-                        relative_path,
-                        partition_json,
-                        row_count,
-                        content_sha256,
-                        parent_source_id,
-                        min_time,
-                        max_time,
-                    ) in parent_fragments:
-                        inherited_id = (
-                            "frag_"
-                            + uuid.uuid5(
-                                uuid.NAMESPACE_URL, snapshot_id + parent_fragment_id
-                            ).hex
-                        )
-                        connection.execute(
-                            """
-                            INSERT OR IGNORE INTO fragments
-                            (fragment_id, snapshot_id, dataset_id, relative_path,
-                             partition_json, row_count, content_sha256, source_id,
-                             min_time, max_time)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            [
-                                inherited_id,
-                                snapshot_id,
-                                dataset_id,
-                                relative_path,
-                                partition_json,
-                                row_count,
-                                content_sha256,
-                                parent_source_id,
-                                min_time,
-                                max_time,
-                            ],
-                        )
             for (
                 chunk_key,
                 relative_path,
@@ -626,11 +581,21 @@ class Catalog:
                 snapshot_id = selected[0]
             rows = connection.execute(
                 """
-                SELECT relative_path, partition_json FROM fragments
-                WHERE dataset_id = ? AND snapshot_id = ?
+                WITH RECURSIVE lineage(snapshot_id) AS (
+                    SELECT ?
+                    UNION
+                    SELECT parent.parent_snapshot_id
+                    FROM snapshot_parents AS parent
+                    JOIN lineage AS child
+                      ON parent.child_snapshot_id = child.snapshot_id
+                )
+                SELECT DISTINCT fragment.relative_path, fragment.partition_json
+                FROM fragments AS fragment
+                JOIN lineage USING (snapshot_id)
+                WHERE fragment.dataset_id = ?
                 ORDER BY relative_path
                 """,
-                [dataset_id, snapshot_id],
+                [snapshot_id, dataset_id],
             ).fetchall()
         paths: list[str] = []
         for path, partition_json in rows:
@@ -658,7 +623,13 @@ class Catalog:
                     SELECT ?
                     UNION
                     SELECT edge.parent_snapshot_id
-                    FROM derivation_edges edge
+                    FROM (
+                        SELECT child_snapshot_id, parent_snapshot_id
+                        FROM derivation_edges
+                        UNION ALL
+                        SELECT child_snapshot_id, parent_snapshot_id
+                        FROM snapshot_parents
+                    ) AS edge
                     JOIN lineage current
                       ON edge.child_snapshot_id = current.snapshot_id
                 )

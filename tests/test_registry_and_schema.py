@@ -39,16 +39,7 @@ def test_every_required_source_has_one_registry_entry() -> None:
         "eccc_hly01_observations",
         "eccc_hly03_observations",
         "eccc_station_inventory",
-        "hydrometric_flow_daily",
-        "hydrometric_level_daily",
-        "reanalysis_points_hourly",
-        "wind_scada_10min",
     } == ids
-
-
-def test_provisional_sources_refuse_ingestion() -> None:
-    with pytest.raises(RuntimeError, match="provisional"):
-        DEFAULT_REGISTRY.get("wind_scada_10min").require_ready()
 
 
 def test_station_inventory_is_resolved() -> None:
@@ -67,36 +58,22 @@ def test_eccc_observation_sources_are_resolved() -> None:
     assert hly01.variable("snow_depth").unit == "cm"
 
 
-def test_private_registry_overlay_is_local_and_changes_identity(tmp_path) -> None:
+def test_private_registry_overlay_changes_identity(tmp_path) -> None:
     private = tmp_path / "private.json"
     private.write_text(
         """
         {
-          "wind_scada_10min": {
-            "source_timezone": "UTC",
-            "timestamp_semantics": "interval_end",
-            "variables": [
-              {"name": "power", "quantity": "active power", "unit": "kW"},
-              {"name": "wind_speed", "quantity": "wind speed", "unit": "m/s"}
-            ],
-            "ingest_options": {
-              "format": "csv",
-              "entity_column": "private_entity",
-              "timestamp_column": "private_time",
-              "column_map": {
-                "power": "private_power",
-                "wind_speed": "private_wind"
-              }
-            },
-            "unresolved_decisions": [],
-            "readiness": "ready"
+          "eccc_hly03_observations": {
+            "description": "Locally annotated ECCC HLY03 observations"
           }
         }
         """
     )
     resolved = load_registry(private)
-    resolved.get("wind_scada_10min").require_ready()
-    assert BASE_REGISTRY.get("wind_scada_10min").readiness.value == "provisional"
+    assert (
+        resolved.get("eccc_hly03_observations").description
+        == "Locally annotated ECCC HLY03 observations"
+    )
     assert resolved.digest != BASE_REGISTRY.digest
 
 
