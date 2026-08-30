@@ -1,17 +1,4 @@
 {
-  "weather_family_a": {
-    "source_timezone": "<verified fixed standard timezone>",
-    "ingest_options": {
-      "entity_allowlist": [
-        "<climate id>"
-      ]
-    },
-    "unresolved_decisions": [
-      "verify the selected stations all use the declared fixed standard timezone",
-      "verify the production file contains only the declared element"
-    ],
-    "readiness": "provisional"
-  },
   "wind_scada_10min": {
     "source_timezone": "<verified source timezone>",
     "timestamp_semantics": "<interval_start or interval_end>",

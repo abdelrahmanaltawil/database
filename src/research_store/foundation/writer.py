@@ -255,6 +255,8 @@ class StoreWriter:
         keys = [spec.entity_field]
         if spec.time_start_field:
             keys.append(spec.time_start_field)
+        if spec.temporal_kind.value == "interval" and spec.time_end_field:
+            keys.append(spec.time_end_field)
         if spec.storage_model.value == "long":
             keys.append("variable")
         quoted = [f'"{key.replace(chr(34), chr(34) * 2)}"' for key in keys]

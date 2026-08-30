@@ -51,13 +51,17 @@ header. The ingester detects that header and preserves numeric and alphanumeric
 Climate IDs as strings:
 
 ```bash
-research-store ingest station_inventory \
+research-store ingest eccc_station_inventory \
   '/absolute/path/to/Station Inventory EN.xlsx' \
   --publisher-vintage '2025-01-02 snapshot'
 ```
 
 Climate observations use the same `entity_id`, so this workbook is the direct
-relational station lookup.
+relational station lookup. The ingester also derives an IANA timezone from each
+station's coordinates and records the timezone boundary package version.
+Stores created before the ECCC naming migration must run this command again
+under `eccc_station_inventory`; the immutable workbook object is deduplicated by
+SHA-256.
 
 ## 5. Resolve public and licensed source declarations
 
@@ -93,17 +97,17 @@ and values. Run:
 python -m pytest
 ```
 
-For the all-Canada ECCC hourly archive, do not assign one timezone to every
-station. The source uses local standard time. Either supply an evidence-backed
-station timezone policy or curate a declared station allowlist whose members
-share one fixed standard-time offset.
+For the all-Canada ECCC hourly archive, the source uses local standard time. The
+ingester uses each station's IANA timezone from `eccc_station_inventory`, removes
+the daylight-saving component, and converts the standard-time interval to UTC.
+It stops if an observation's Climate ID has no station timezone.
 
 ## 6. Ingest immutable sources
 
 All source formats use the same command. Examples:
 
 ```bash
-research-store ingest weather_family_a /download/archive-2019.txt \
+research-store ingest eccc_hly01_observations /download/HLY01_RCS_P2019 \
   --source-uri 'https://publisher.example/archive-2019.txt' \
   --publisher-vintage '2019 annual release' \
   --fetched-at '2026-08-29T12:00:00Z'
@@ -125,22 +129,27 @@ ingestion runs.
 If a command is interrupted, run the identical command again. Completed chunk
 keys are reused and a partial snapshot remains invisible.
 
-The climate IDs currently map as follows:
+The configured ECCC source elements currently map as follows:
 
-| Dataset | Publisher record | Element | Canonical variable |
-|---|---|---:|---|
-| `weather_family_a` | ECCC HLY01 RCS | 262 | `precipitation_amount` in mm |
-| `weather_family_b` | ECCC HLY03 | 123 | `precipitation_amount` in mm |
+| Dataset | Elements | Canonical variables |
+|---|---|---|
+| `eccc_hly01_observations` | 262-280 | Hourly/15-minute precipitation, gauge weight, 2 m wind and snow depth |
+| `eccc_hly03_observations` | 123 | `precipitation_amount_1h` in mm |
+
+The physical long table retains `source_element`. Each element declaration owns
+its scale, unit and interval placement. Register additional documented HLY01
+elements, such as temperature, in the same dataset before ingesting a file that
+contains them; undeclared codes stop ingestion.
 
 ## 7. Verify provenance and measured cost
 
 ```bash
-research-store provenance weather_family_a
+research-store provenance eccc_hly01_observations
 
-research-store benchmark weather_family_a \
+research-store benchmark eccc_hly01_observations \
   --entity '0100001' \
   --year 2019 \
-  --variable precipitation_amount
+  --variable precipitation_amount_1h
 ```
 
 Record benchmark JSON when changing entity bucket counts or fragment sizes.
@@ -151,11 +160,11 @@ Record benchmark JSON when changing entity bucket counts or fragment sizes.
 from research_store import load
 
 rain = load(
-    "weather_family_a",
+    "eccc_hly01_observations",
     entity="0100001",
-    variable="precipitation_amount",
+    variable="precipitation_amount_1h",
     start="2015",
-    end="2020",       # exclusive
+    end="2020",  # exclusive
 )
 
 snapshot_used = rain.attrs["snapshot_id"]
@@ -182,9 +191,7 @@ with connect() as sql:
         "SELECT * FROM wind_scada_10min WHERE entity_id = ?",
         ["T07"],
     ).fetchdf()
-    sources = sql.execute(
-        "SELECT * FROM catalog.main.source_files"
-    ).fetchdf()
+    sources = sql.execute("SELECT * FROM catalog.main.source_files").fetchdf()
 ```
 
 Dataset views keep variables in separate columns. Catalogue tables are attached
@@ -194,9 +201,9 @@ Join precipitation to the station workbook using the shared string Climate ID:
 
 ```sql
 SELECT p.entity_id, s.station_name, s.latitude, s.longitude,
-       p.time_start, p.precipitation_amount
-FROM weather_family_b AS p
-JOIN station_inventory AS s USING (entity_id)
+       p.time_start, p.precipitation_amount_1h
+FROM eccc_hly03_observations AS p
+JOIN eccc_station_inventory AS s USING (entity_id)
 ```
 
 ## 10. Backup

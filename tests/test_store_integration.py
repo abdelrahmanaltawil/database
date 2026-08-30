@@ -108,6 +108,7 @@ def test_ingest_load_sql_and_provenance(
     assert all("year=2024" in path for path in selected_paths)
 
     with connect(store=store_paths.root, registry=registry) as sql:
+        assert sql.execute("SELECT current_setting('TimeZone')").fetchone()[0] == "UTC"
         result = sql.execute(
             "SELECT entity_id, power FROM test_sensor WHERE entity_id = ?", ["0100001"]
         ).fetchall()

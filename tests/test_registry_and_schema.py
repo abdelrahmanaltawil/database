@@ -36,11 +36,11 @@ def _wide_table(entity_values, *, value_type=None, timezone="UTC") -> pa.Table:
 def test_every_required_source_has_one_registry_entry() -> None:
     ids = {spec.dataset_id for spec in DEFAULT_REGISTRY}
     assert {
-        "weather_family_a",
-        "weather_family_b",
+        "eccc_hly01_observations",
+        "eccc_hly03_observations",
+        "eccc_station_inventory",
         "hydrometric_flow_daily",
         "hydrometric_level_daily",
-        "station_inventory",
         "reanalysis_points_hourly",
         "wind_scada_10min",
     } == ids
@@ -52,7 +52,19 @@ def test_provisional_sources_refuse_ingestion() -> None:
 
 
 def test_station_inventory_is_resolved() -> None:
-    DEFAULT_REGISTRY.get("station_inventory").require_ready()
+    DEFAULT_REGISTRY.get("eccc_station_inventory").require_ready()
+
+
+def test_eccc_observation_sources_are_resolved() -> None:
+    hly01 = DEFAULT_REGISTRY.get("eccc_hly01_observations")
+    hly03 = DEFAULT_REGISTRY.get("eccc_hly03_observations")
+    hly01.require_ready()
+    hly03.require_ready()
+    assert set(hly01.ingest_options["elements"]) == {
+        str(code) for code in range(262, 281)
+    }
+    assert hly01.variable("precipitation_amount_1h").unit == "mm"
+    assert hly01.variable("snow_depth").unit == "cm"
 
 
 def test_private_registry_overlay_is_local_and_changes_identity(tmp_path) -> None:

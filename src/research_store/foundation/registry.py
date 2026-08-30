@@ -31,16 +31,63 @@ PRIVATE_REGISTRY_ENV = "RESEARCH_STORE_PRIVATE_REGISTRY"
 BASE_REGISTRY = Registry(
     [
         DatasetSpec(
-            dataset_id="weather_family_a",
-            description=("ECCC HLY01 RCS hourly precipitation amount (element 262)"),
+            dataset_id="eccc_hly01_observations",
+            description=(
+                "ECCC HLY01 hourly weather observations, including RCS elements"
+            ),
             kind=DatasetKind.EXTERNAL,
             producer="fixed_width_hourly",
             storage_model=StorageModel.LONG,
             temporal_kind=TemporalKind.INTERVAL,
-            native_frequency="1 hour",
-            timestamp_semantics="source slots 00-23 represent hourly intervals",
+            native_frequency="element-specific intervals from 5 minutes to 1 hour",
+            source_timezone="station-specific IANA local standard time",
+            timestamp_semantics=(
+                "HLY01 slots 00-23; each registered element declares its interval "
+                "within the source hour and is converted from local standard time"
+            ),
             variables=(
-                VariableSpec("precipitation_amount", "precipitation amount", "mm"),
+                VariableSpec(
+                    "precipitation_amount_1h",
+                    "precipitation amount",
+                    "mm",
+                    quality_field="precipitation_amount_1h_quality",
+                ),
+                VariableSpec(
+                    "precipitation_amount_15min",
+                    "precipitation amount",
+                    "mm",
+                    quality_field="precipitation_amount_15min_quality",
+                ),
+                VariableSpec(
+                    "precipitation_gauge_weight",
+                    "precipitation gauge mass per unit area",
+                    "kg/m2",
+                    quality_field="precipitation_gauge_weight_quality",
+                ),
+                VariableSpec(
+                    "wind_speed_2m_15min",
+                    "wind speed at approximately 2 m",
+                    "km/h",
+                    quality_field="wind_speed_2m_15min_quality",
+                ),
+                VariableSpec(
+                    "snow_depth",
+                    "snow depth",
+                    "cm",
+                    quality_field="snow_depth_quality",
+                ),
+                VariableSpec(
+                    "wind_direction_2m_10min",
+                    "wind direction at approximately 2 m",
+                    "degree_true",
+                    quality_field="wind_direction_2m_10min_quality",
+                ),
+                VariableSpec(
+                    "wind_speed_2m_10min",
+                    "wind speed at approximately 2 m",
+                    "km/h",
+                    quality_field="wind_speed_2m_10min_quality",
+                ),
             ),
             sentinel_rules=(
                 SentinelRule(
@@ -50,7 +97,6 @@ BASE_REGISTRY = Registry(
                     evidence="ECCC Digital Archive Technical Documentation, section 2.3",
                 ),
             ),
-            readiness=_PROVISIONAL,
             ingest_options={
                 "station_slice": [0, 7],
                 "date_slice": [7, 15],
@@ -59,26 +105,162 @@ BASE_REGISTRY = Registry(
                 "values_start": 18,
                 "field_width": 7,
                 "value_width": 6,
-                "element_map": {"262": "precipitation_amount"},
-                "scale": 0.1,
+                "timezone_policy": "station_inventory",
+                "station_dataset_id": "eccc_station_inventory",
+                "elements": {
+                    "262": {
+                        "variable": "precipitation_amount_1h",
+                        "scale": 0.1,
+                        "start_minute": 0,
+                        "duration_minutes": 60,
+                    },
+                    "263": {
+                        "variable": "precipitation_amount_15min",
+                        "scale": 0.1,
+                        "start_minute": 0,
+                        "duration_minutes": 15,
+                    },
+                    "264": {
+                        "variable": "precipitation_amount_15min",
+                        "scale": 0.1,
+                        "start_minute": 15,
+                        "duration_minutes": 15,
+                    },
+                    "265": {
+                        "variable": "precipitation_amount_15min",
+                        "scale": 0.1,
+                        "start_minute": 30,
+                        "duration_minutes": 15,
+                    },
+                    "266": {
+                        "variable": "precipitation_amount_15min",
+                        "scale": 0.1,
+                        "start_minute": 45,
+                        "duration_minutes": 15,
+                    },
+                    "267": {
+                        "variable": "precipitation_gauge_weight",
+                        "scale": 0.1,
+                        "end_minute": 15,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "268": {
+                        "variable": "precipitation_gauge_weight",
+                        "scale": 0.1,
+                        "end_minute": 30,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "269": {
+                        "variable": "precipitation_gauge_weight",
+                        "scale": 0.1,
+                        "end_minute": 45,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "270": {
+                        "variable": "precipitation_gauge_weight",
+                        "scale": 0.1,
+                        "end_minute": 60,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "271": {
+                        "variable": "wind_speed_2m_15min",
+                        "scale": 0.1,
+                        "start_minute": 0,
+                        "duration_minutes": 15,
+                    },
+                    "272": {
+                        "variable": "wind_speed_2m_15min",
+                        "scale": 0.1,
+                        "start_minute": 15,
+                        "duration_minutes": 15,
+                    },
+                    "273": {
+                        "variable": "wind_speed_2m_15min",
+                        "scale": 0.1,
+                        "start_minute": 30,
+                        "duration_minutes": 15,
+                    },
+                    "274": {
+                        "variable": "wind_speed_2m_15min",
+                        "scale": 0.1,
+                        "start_minute": 45,
+                        "duration_minutes": 15,
+                    },
+                    "275": {
+                        "variable": "snow_depth",
+                        "scale": 1.0,
+                        "end_minute": 60,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "276": {
+                        "variable": "snow_depth",
+                        "scale": 1.0,
+                        "end_minute": 15,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "277": {
+                        "variable": "snow_depth",
+                        "scale": 1.0,
+                        "end_minute": 30,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "278": {
+                        "variable": "snow_depth",
+                        "scale": 1.0,
+                        "end_minute": 45,
+                        "duration_minutes": 5,
+                        "before_year": 2007,
+                        "duration_minutes_before": 9,
+                    },
+                    "279": {
+                        "variable": "wind_direction_2m_10min",
+                        "scale": 1.0,
+                        "start_minute": 50,
+                        "duration_minutes": 10,
+                    },
+                    "280": {
+                        "variable": "wind_speed_2m_10min",
+                        "scale": 0.1,
+                        "start_minute": 50,
+                        "duration_minutes": 10,
+                    },
+                },
                 "encoding": "ascii",
             },
-            unresolved_decisions=(
-                "supply a documented station-specific local-standard-time to UTC policy",
-                "confirm production HLY01_RCS_P files contain only declared element 262",
-            ),
         ),
         DatasetSpec(
-            dataset_id="weather_family_b",
+            dataset_id="eccc_hly03_observations",
             description="ECCC HLY03 hourly rainfall rate archive (element 123)",
             kind=DatasetKind.EXTERNAL,
             producer="fixed_width_hourly",
             storage_model=StorageModel.LONG,
             temporal_kind=TemporalKind.INTERVAL,
             native_frequency="1 hour",
-            timestamp_semantics="source slots are intervals ending 01-24 local standard time",
+            source_timezone="station-specific IANA local standard time",
+            timestamp_semantics=(
+                "source slots are hourly intervals ending 01-24 local standard time"
+            ),
             variables=(
-                VariableSpec("precipitation_amount", "precipitation amount", "mm"),
+                VariableSpec(
+                    "precipitation_amount_1h",
+                    "precipitation amount",
+                    "mm",
+                    quality_field="precipitation_amount_1h_quality",
+                ),
             ),
             sentinel_rules=(
                 SentinelRule(
@@ -88,7 +270,6 @@ BASE_REGISTRY = Registry(
                     evidence="ECCC Digital Archive Technical Documentation, section 2.3",
                 ),
             ),
-            readiness=_PROVISIONAL,
             ingest_options={
                 "station_slice": [0, 7],
                 "date_slice": [7, 15],
@@ -97,13 +278,18 @@ BASE_REGISTRY = Registry(
                 "values_start": 18,
                 "field_width": 7,
                 "value_width": 6,
-                "element_map": {"123": "precipitation_amount"},
-                "scale": 0.1,
+                "timezone_policy": "station_inventory",
+                "station_dataset_id": "eccc_station_inventory",
+                "elements": {
+                    "123": {
+                        "variable": "precipitation_amount_1h",
+                        "scale": 0.1,
+                        "start_minute": 0,
+                        "duration_minutes": 60,
+                    }
+                },
                 "encoding": "ascii",
             },
-            unresolved_decisions=(
-                "supply a documented station-specific local-standard-time to UTC policy",
-            ),
         ),
         DatasetSpec(
             dataset_id="hydrometric_flow_daily",
@@ -165,7 +351,7 @@ BASE_REGISTRY = Registry(
             ),
         ),
         DatasetSpec(
-            dataset_id="station_inventory",
+            dataset_id="eccc_station_inventory",
             description="Versioned ECCC station inventory workbook",
             kind=DatasetKind.REFERENCE,
             producer="inventory_csv",
@@ -199,6 +385,18 @@ BASE_REGISTRY = Registry(
                 VariableSpec("dly_last_year", "last daily-data year", "year"),
                 VariableSpec("mly_first_year", "first monthly-data year", "year"),
                 VariableSpec("mly_last_year", "last monthly-data year", "year"),
+                VariableSpec(
+                    "timezone_name",
+                    "IANA timezone inferred from station coordinates",
+                    None,
+                    dtype="string",
+                ),
+                VariableSpec(
+                    "timezone_source",
+                    "timezone boundary dataset used for coordinate lookup",
+                    None,
+                    dtype="string",
+                ),
             ),
             partition_keys=(),
             ingest_options={
@@ -224,6 +422,7 @@ BASE_REGISTRY = Registry(
                     "mly_last_year": "MLY Last Year",
                 },
                 "source_longitude_convention": "signed",
+                "derive_timezone_from_coordinates": True,
             },
         ),
         DatasetSpec(

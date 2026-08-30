@@ -196,6 +196,7 @@ def load(
         order.append(_identifier(spec.time_start_field))
     query = f"SELECT * FROM ({logical}) AS logical{where} ORDER BY {', '.join(order)}"
     with duckdb.connect() as connection:
+        connection.execute("SET TimeZone = 'UTC'")
         frame = connection.execute(query, parameters).fetchdf()
 
     frame[spec.entity_field] = frame[spec.entity_field].astype("string")
@@ -230,6 +231,7 @@ def connect(
     if not paths.catalog.exists():
         raise FileNotFoundError(f"Store catalogue does not exist: {paths.catalog}")
     connection = duckdb.connect()
+    connection.execute("SET TimeZone = 'UTC'")
     catalog_path = _sql_string(str(paths.catalog))
     connection.execute(f"ATTACH {catalog_path} AS catalog (READ_ONLY)")
     catalog = Catalog(paths)

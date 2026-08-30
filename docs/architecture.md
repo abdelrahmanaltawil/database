@@ -108,9 +108,23 @@ foundation writer instead validates their schema and injects catalogue-owned
 source and producer-run identifiers before publication. SQL clients attach the
 catalogue read-only and expose only logical dataset views.
 
-Climate observations and `station_inventory` deliberately use the same string
-`entity_id`: the ECCC Climate ID. Numeric and alphanumeric values are both
-preserved, so an observation can be joined directly to its station metadata.
+Climate observations and `eccc_station_inventory` deliberately use the same
+string `entity_id`: the ECCC Climate ID. Numeric and alphanumeric values are
+both preserved, so an observation can be joined directly to its station
+metadata.
+
+ECCC HLY products are source-specific datasets rather than anonymous weather
+families. `eccc_hly01_observations` is long-form and supports multiple registered
+elements with per-element scale, unit and interval placement. This allows the
+same relation to hold hourly precipitation, quarter-hour precipitation, gauge
+weight, near-gauge wind and snow depth without losing the publisher element
+code. Additional HLY01 variables such as temperature can be registered without
+creating another physical model. `eccc_hly03_observations` remains separate
+because its source product and timestamp semantics differ.
+
+The timezone polygon data package is pinned. Its installed version is stored in
+each station row, so a future boundary-data update is an explicit ingester and
+registry change rather than a silent reinterpretation of historical timestamps.
 
 ## Public and private source configuration
 
@@ -186,7 +200,7 @@ measurements. No size or timing estimate has been invented from filenames.
 | Numeric-looking identifiers | String schema required before publication |
 | 30 February after unpivot | Calendar arithmetic drops impossible day slots; invalid year/month raises |
 | Longitude conventions | Explicit conversion to signed EPSG:4326; unknown convention raises |
-| Local/DST/UTC confusion | Source timezone and labelling required; ambiguous/nonexistent clocks raise |
+| Local/DST/UTC confusion | ECCC station coordinates resolve to IANA zones; the historical standard offset is used and DST is removed before conversion to UTC |
 | Different sampling frequencies | Native frequency remains registry metadata; no ingestion resampling |
 | float64 narrowed to float32 | Writer schema validation rejects float32 |
 | Cloud-synchronized root | Resolver and `doctor` warn |
@@ -195,12 +209,9 @@ measurements. No size or timing estimate has been invented from filenames.
 
 ## Decisions deliberately unresolved
 
-The station inventory is ready. Remaining source entries are `provisional`;
-ingestion is blocked until the listed unresolved decisions are closed. For the
-national ECCC hourly files, the fixed-width positions, scale, element codes,
-missing marker and interval slots are resolved, but station-specific local
-standard time still requires an evidence-backed UTC policy. The store also does
-not decide which
+The ECCC station inventory and HLY01/HLY03 declarations are ready. Remaining
+source entries are `provisional`; ingestion is blocked until their listed
+unresolved decisions are closed. The store still does not decide which
 overlapping instrument is the analysis series, whether cross-source entities
 are identical, or whether a grid is sampled at a point or aggregated over an
 area. Candidate relationships and evidence belong in the store; acceptance is

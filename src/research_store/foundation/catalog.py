@@ -171,7 +171,9 @@ class Catalog:
         self.paths = paths
 
     def open(self, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.paths.catalog), read_only=read_only)
+        connection = duckdb.connect(str(self.paths.catalog), read_only=read_only)
+        connection.execute("SET TimeZone = 'UTC'")
+        return connection
 
     def initialize(self, registry: Registry) -> None:
         self.paths.create()

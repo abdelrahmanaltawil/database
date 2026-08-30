@@ -77,6 +77,15 @@ def validate_table(table: pa.Table, spec: DatasetSpec) -> None:
         unknown = observed - set(declared)
         if unknown:
             raise ValueError(f"Undeclared variables: {sorted(unknown)}")
+        if "source_element" in table.column_names:
+            source_element = _require_field(table, "source_element")
+            if not (
+                pa.types.is_string(source_element.type)
+                or pa.types.is_large_string(source_element.type)
+            ):
+                raise TypeError("source_element must be a string")
+            if table.column("source_element").null_count:
+                raise ValueError("source_element may not be null")
     else:
         for name, variable in declared.items():
             field = _require_field(table, name)
@@ -102,7 +111,12 @@ def validate_table(table: pa.Table, spec: DatasetSpec) -> None:
     if spec.time_end_field:
         key_fields.add(spec.time_end_field)
     if spec.storage_model is StorageModel.LONG:
-        allowed = key_fields | {"variable", "value", "quality_flag"}
+        allowed = key_fields | {
+            "variable",
+            "value",
+            "quality_flag",
+            "source_element",
+        }
     else:
         allowed = key_fields | set(declared)
         allowed.update(
@@ -120,6 +134,8 @@ def validate_no_duplicate_observations(table: pa.Table, spec: DatasetSpec) -> No
         keys = [spec.entity_field]
     else:
         keys = [spec.entity_field, spec.time_start_field]
+        if spec.temporal_kind is TemporalKind.INTERVAL and spec.time_end_field:
+            keys.append(spec.time_end_field)
         if spec.storage_model is StorageModel.LONG:
             keys.append("variable")
     frame = table.select(keys).to_pandas()
