@@ -50,6 +50,15 @@ class PlausibleBand:
     minimum: float
     maximum: float
     evidence: str = ""
+    ignore_zeros: bool = False
+    """Measure only values that recorded something.
+
+    A zero-inflated variable such as hourly precipitation is zero for most of
+    its slots, so a quantile of the whole distribution is either zero, which
+    cannot discriminate any scale, or lands inside whatever junk the archive
+    carries in its tail. The quantile of the non-zero values is the
+    distribution of actual measurements, and moves with the scale factor.
+    """
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.quantile <= 1.0:
@@ -65,8 +74,10 @@ class PlausibleBand:
             )
 
     def describe(self) -> str:
+        measured = "non-zero values" if self.ignore_zeros else "values"
         return (
-            f"quantile {self.quantile:g} within [{self.minimum:g}, {self.maximum:g}]"
+            f"quantile {self.quantile:g} of {measured} within "
+            f"[{self.minimum:g}, {self.maximum:g}]"
         )
 
 

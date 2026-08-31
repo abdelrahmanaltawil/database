@@ -251,18 +251,21 @@ BASE_REGISTRY = Registry(
                     "mm",
                     quality_field="precipitation_amount_1h_quality",
                     plausible_band=PlausibleBand(
-                        quantile=0.99,
-                        minimum=0.0,
-                        maximum=50.0,
+                        quantile=0.5,
+                        minimum=0.02,
+                        maximum=20.0,
+                        ignore_zeros=True,
                         evidence=(
                             "A tripwire for a wrong scale, not a quality filter. "
-                            "The observed 99th percentile of hourly totals in the "
-                            "delivered archive is about 2.9 mm; a scale wrong by "
-                            "a factor of ten or more would push it past 29 mm. "
-                            "The check deliberately reads the 99th percentile "
-                            "rather than further out, because this un-QC archive "
-                            "carries a contaminated tail above 400 mm that says "
-                            "nothing about the scale factor."
+                            "Hourly precipitation is zero for about 93 percent of "
+                            "slots and this un-QC archive carries a junk block "
+                            "above 100 mm that reaches 1.1 percent of values in "
+                            "some years, so any quantile of the whole "
+                            "distribution is either zero or inside the junk. The "
+                            "median of the values that recorded something is "
+                            "neither: it reads 0.3-1.1 mm across the delivered "
+                            "2004-2025 archive, and a scale wrong by a hundred "
+                            "would read 30-110 mm."
                         ),
                     ),
                 ),
@@ -272,15 +275,16 @@ BASE_REGISTRY = Registry(
                     "mm",
                     quality_field="precipitation_amount_15min_quality",
                     plausible_band=PlausibleBand(
-                        quantile=0.99,
-                        minimum=0.0,
-                        maximum=1000.0,
+                        quantile=0.5,
+                        minimum=0.02,
+                        maximum=20.0,
+                        ignore_zeros=True,
                         evidence=(
-                            "A tripwire for a wrong scale. Fifteen-minute totals "
-                            "are zero for more than 99 percent of slots and the "
-                            "un-QC tail reaches about 423 mm, so the bound is "
-                            "loose; it still catches a scale wrong by a factor "
-                            "of a hundred, which would read above 42000 mm."
+                            "A tripwire for a wrong scale, measured on the values "
+                            "that recorded something for the same reason as the "
+                            "hourly total. The median non-zero fifteen-minute "
+                            "amount reads 0.3-0.6 mm across the delivered "
+                            "2004-2025 archive."
                         ),
                     ),
                 ),

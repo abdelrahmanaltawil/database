@@ -489,6 +489,8 @@ class StoreWriter:
                     quoted = '"' + variable.name.replace('"', '""') + '"'
                     expression = quoted
                     predicate = f"{quoted} IS NOT NULL"
+                if band.ignore_zeros:
+                    predicate += f" AND {expression} <> 0"
                 row = connection.execute(
                     f"SELECT count(*), quantile_cont({expression}, {band.quantile}) "
                     f"FROM {relation} WHERE {predicate}"
@@ -511,40 +513,41 @@ class StoreWriter:
         new_partitions: list[dict[str, Any]],
         spec: DatasetSpec,
     ) -> None:
-        prior_paths: list[str] = []
-        prior_partitions: list[dict[str, Any]] = []
-        if spec.snapshot_mode == "append":
-            _, prior = self.catalog.latest_committed_fragments(spec.dataset_id)
-            prior_paths = [path for path, _ in prior]
-            prior_partitions = [partition for _, partition in prior]
-        if prior_paths and not self._partitions_disjoint(
-            prior_partitions, new_partitions, spec
-        ):
-            self._validate_snapshot_keys([*prior_paths, *readable], spec)
-        else:
+        if spec.snapshot_mode != "append":
             self._validate_snapshot_keys(readable, spec)
+            return
+        _, prior = self.catalog.latest_committed_fragments(spec.dataset_id)
+        relevant = self._prior_fragments_that_could_collide(
+            prior, new_partitions, spec
+        )
+        self._validate_snapshot_keys([*relevant, *readable], spec)
 
     @staticmethod
-    def _partitions_disjoint(
-        prior: list[dict[str, Any]],
+    def _prior_fragments_that_could_collide(
+        prior: list[tuple[str, dict[str, Any]]],
         incoming: list[dict[str, Any]],
         spec: DatasetSpec,
-    ) -> bool:
-        """Avoid rescanning old rows when an append cannot collide with them.
+    ) -> list[str]:
+        """The already-published fragments an append could actually duplicate.
 
         Every partition key is a function of part of the observation key: `year`
-        of the timestamp, `entity_bucket` of the entity. If the two sides share
-        no value of any one key, they share no observation key either.
+        of the timestamp, `entity_bucket` of the entity. Two rows sharing an
+        observation key therefore share a partition, so a duplicate can only
+        arise between fragments in the *same* partition. Comparing an append
+        against the whole dataset instead would grow with the archive: checking
+        one annual file against a published billion rows is a full group-by over
+        all of them, for a collision that is only possible in a handful of
+        partitions.
         """
 
-        for key in spec.partition_keys:
-            prior_values = {partition.get(key) for partition in prior}
-            new_values = {partition.get(key) for partition in incoming}
-            if None in prior_values or None in new_values:
-                continue
-            if prior_values.isdisjoint(new_values):
-                return True
-        return False
+        if not spec.partition_keys:
+            return [path for path, _ in prior]
+
+        def signature(partition: dict[str, Any]) -> tuple[Any, ...]:
+            return tuple(partition.get(key) for key in spec.partition_keys)
+
+        wanted = {signature(partition) for partition in incoming}
+        return [path for path, partition in prior if signature(partition) in wanted]
 
     def _validate_snapshot_keys(self, paths: list[str], spec: DatasetSpec) -> None:
         fragments = sorted(paths)

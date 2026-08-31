@@ -198,6 +198,17 @@ def diagnose(
                 )
             )
 
+    facts["absolute_raw_paths"] = catalog.absolute_raw_path_count()
+    if facts["absolute_raw_paths"]:
+        findings.append(
+            Finding(
+                "problem",
+                "absolute_raw_paths",
+                f"{facts['absolute_raw_paths']:,} archived-source rows store "
+                f"absolute paths, so a restored store could not replay them; "
+                f"run research-store migrate",
+            )
+        )
     absolute = catalog.absolute_path_count()
     facts["absolute_fragment_paths"] = absolute
     if absolute:
@@ -482,6 +493,7 @@ def migrate_store(
         "already_placed": 0,
         "missing": [],
         "fragment_rows_repathed": 0,
+        "source_rows_repathed": 0,
         "chunk_rows_repathed": 0,
         "time_bounds_filled": 0,
     }
@@ -550,6 +562,27 @@ def migrate_store(
             f"  migrated {min(offset + batch_size, len(outstanding)):,}/"
             f"{len(outstanding):,} (relocated {report['relocated']:,})"
         )
+
+    # ---------------- archived source objects ----------------
+    if report["complete"]:
+        with catalog.open(read_only=True) as connection:
+            sources = connection.execute(
+                "SELECT source_id, raw_path FROM source_files "
+                "WHERE starts_with(raw_path, '/')"
+            ).fetchall()
+        source_updates = []
+        for source_id, stored in sources:
+            found = resolve_stored_path(paths, stored)
+            if found is not None:
+                source_updates.append((paths.relative(found), source_id))
+        if apply and source_updates:
+            with catalog.transaction() as connection:
+                connection.executemany(
+                    "UPDATE source_files SET raw_path = ? WHERE source_id = ?",
+                    [list(row) for row in source_updates],
+                )
+        report["source_rows_repathed"] = len(source_updates)
+        say(f"archived-source rows re-pathed: {len(source_updates):,}")
 
     # ---------------- staged chunks point at the same places ----------------
     if report["complete"]:

@@ -729,3 +729,130 @@ def test_archived_sources_prefers_a_publisher_name_over_a_digest(
     rows = catalog.archived_sources(long_spec.dataset_id)
     assert len(rows) == 1, "one row per archived source, whatever its alias history"
     assert rows[0][1] == "observations.csv"
+
+
+def test_a_band_can_ignore_zeros_for_a_zero_inflated_variable(tmp_path, store_paths):
+    """Most precipitation slots record no rain.
+
+    A quantile of the whole distribution is then either zero, which cannot
+    discriminate any scale, or sits inside whatever junk the archive carries in
+    its tail. The quantile of the values that recorded something is the
+    distribution of actual measurements.
+    """
+
+    spec = DatasetSpec(
+        dataset_id="zero_inflated",
+        description="A mostly-zero variable with a contaminated upper tail",
+        kind=DatasetKind.EXTERNAL,
+        producer="synthetic",
+        storage_model=StorageModel.LONG,
+        temporal_kind=TemporalKind.INTERVAL,
+        variables=(
+            VariableSpec(
+                "rain",
+                "precipitation amount",
+                "mm",
+                plausible_band=PlausibleBand(
+                    quantile=0.5,
+                    minimum=0.02,
+                    maximum=20.0,
+                    ignore_zeros=True,
+                    evidence="median non-zero hourly rainfall is under a millimetre",
+                ),
+            ),
+        ),
+        entity_buckets=4,
+    )
+    registry = Registry([spec])
+    source = tmp_path / "rain.csv"
+    source.write_text("bytes\n")
+
+    def series(scale: float) -> list[tuple[str, str, str, float]]:
+        rows = []
+        for hour in range(24):
+            for minute in (0, 30):
+                index = hour * 2 + minute // 30
+                # 90% zeros, a little real rain, and a junk tail like the archive's
+                if index < 42:
+                    value = 0.0
+                elif index < 46:
+                    value = 0.8 * scale
+                else:
+                    value = 900.0
+                rows.append(
+                    (
+                        "0100001",
+                        f"2024-01-01T{hour:02d}:{minute:02d}:00Z",
+                        "rain",
+                        value,
+                    )
+                )
+        return rows
+
+    def frame(rows):
+        import pandas as pd
+
+        built = pd.DataFrame(rows, columns=["entity_id", "time_start", "variable", "value"])
+        built["entity_id"] = built["entity_id"].astype("string")
+        built["time_start"] = pd.to_datetime(built["time_start"], utc=True)
+        built["time_end"] = built["time_start"] + pd.Timedelta(minutes=30)
+        built["variable"] = built["variable"].astype("string")
+        built["value"] = built["value"].astype("float64")
+        return built[["entity_id", "time_start", "time_end", "variable", "value"]]
+
+    # Correct scale passes even though the tail is absurd and most slots are zero.
+    _ingest(spec, registry, store_paths, source, frame(series(1.0)))
+    published = load("zero_inflated", store=store_paths.root, registry=registry)
+    assert published["rain"].max() == 900.0, "the junk tail is preserved, not clipped"
+
+    # A hundredfold error moves the median of what was measured, and is caught.
+    other = tmp_path / "rain2.csv"
+    other.write_text("other bytes\n")
+    with pytest.raises(ValueError, match="plausibility band"):
+        _ingest(spec, registry, store_paths, other, frame(series(100.0)))
+
+
+def test_an_append_only_rescans_partitions_it_could_collide_with(
+    seeded, store_paths, registry, long_spec, tmp_path
+):
+    """Duplicate checking must not grow with the size of the archive.
+
+    An observation key determines its partition, so an append can only collide
+    inside a partition it writes to. Checking it against every published
+    fragment would make each annual file cost a scan of the whole dataset.
+    """
+
+    published = [
+        path
+        for path, _ in Catalog(store_paths).latest_committed_fragments(
+            long_spec.dataset_id
+        )[1]
+    ]
+    assert published
+
+    from research_store.foundation.writer import StoreWriter
+
+    prior = Catalog(store_paths).latest_committed_fragments(long_spec.dataset_id)[1]
+
+    # An append landing in a year nothing has been published for rescans nothing.
+    untouched = StoreWriter._prior_fragments_that_could_collide(
+        prior, [{"year": 2099, "entity_bucket": 0}], long_spec
+    )
+    assert untouched == []
+
+    # An append landing in a published partition rescans exactly that partition.
+    existing = prior[0][1]
+    overlapping = StoreWriter._prior_fragments_that_could_collide(
+        prior, [existing], long_spec
+    )
+    assert len(overlapping) == 1
+    assert len(overlapping) < len(prior) or len(prior) == 1
+
+    # And the duplicate it exists to catch is still caught.
+    source = tmp_path / "again.csv"
+    source.write_text("different bytes, same observations\n")
+    duplicate = _long_frame(
+        [("0100001", "2024-01-01T00:00:00Z", "rain", 1.0)]
+    )
+    with pytest.raises(ValueError, match="Duplicate observation keys"):
+        _ingest(long_spec, registry, store_paths, source, duplicate)

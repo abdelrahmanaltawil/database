@@ -461,7 +461,7 @@ class Catalog:
                 (source_id, sha256, size_bytes, raw_path)
                 VALUES (?, ?, ?, ?)
                 """,
-                [source_id, sha256, size_bytes, str(raw_path)],
+                [source_id, sha256, size_bytes, self.paths.relative(raw_path)],
             )
             connection.execute(
                 """
@@ -764,7 +764,16 @@ class Catalog:
         chunks = self.staged_chunks(run_id)
         if not chunks:
             raise RuntimeError("Cannot publish an ingestion run with no staged chunks")
+        for _chunk_key, relative_path, *_rest in chunks:
+            path = self.paths.root / relative_path
+            if not path.is_file():
+                raise FileNotFoundError(f"Published fragment is missing: {path}")
         with self.transaction() as connection:
+            # Re-publishing a snapshot must land exactly where it landed before,
+            # so the manifest is rebuilt rather than merged into.
+            connection.execute(
+                "DELETE FROM fragments WHERE snapshot_id = ?", [snapshot_id]
+            )
             if snapshot_mode == "append":
                 previous = connection.execute(
                     """
@@ -783,82 +792,38 @@ class Catalog:
                         """,
                         [snapshot_id, parent_snapshot_id],
                     )
-                    parent_fragments = connection.execute(
+                    # One set-based statement, not one per inherited fragment.
+                    # A mature dataset inherits tens of thousands of them, and a
+                    # row-at-a-time loop inside a transaction holds all of that
+                    # in memory before it can commit.
+                    connection.execute(
                         """
-                        SELECT fragment_id, relative_path, partition_json, row_count,
+                        INSERT INTO fragments
+                        (fragment_id, snapshot_id, dataset_id, relative_path,
+                         partition_json, row_count, content_sha256, source_id,
+                         min_time, max_time)
+                        SELECT 'frag_' || md5(? || fragment_id), ?, dataset_id,
+                               relative_path, partition_json, row_count,
                                content_sha256, source_id, min_time, max_time
                         FROM fragments WHERE snapshot_id = ?
                         """,
-                        [parent_snapshot_id],
-                    ).fetchall()
-                    for (
-                        parent_fragment_id,
-                        relative_path,
-                        partition_json,
-                        row_count,
-                        content_sha256,
-                        parent_source_id,
-                        min_time,
-                        max_time,
-                    ) in parent_fragments:
-                        inherited_id = (
-                            "frag_"
-                            + uuid.uuid5(
-                                uuid.NAMESPACE_URL, snapshot_id + parent_fragment_id
-                            ).hex
-                        )
-                        connection.execute(
-                            """
-                            INSERT OR IGNORE INTO fragments
-                            (fragment_id, snapshot_id, dataset_id, relative_path,
-                             partition_json, row_count, content_sha256, source_id,
-                             min_time, max_time)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            [
-                                inherited_id,
-                                snapshot_id,
-                                dataset_id,
-                                relative_path,
-                                partition_json,
-                                row_count,
-                                content_sha256,
-                                parent_source_id,
-                                min_time,
-                                max_time,
-                            ],
-                        )
-            for (
-                chunk_key,
-                relative_path,
-                _partition_json,
-                _row_count,
-                _content_sha256,
-                _chunk_source_id,
-            ) in chunks:
-                fragment_id = f"frag_{uuid.uuid5(uuid.NAMESPACE_URL, snapshot_id + chunk_key).hex}"
-                path = self.paths.root / relative_path
-                if not path.is_file():
-                    raise FileNotFoundError(f"Published fragment is missing: {path}")
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO fragments
-                    (fragment_id, snapshot_id, dataset_id, relative_path, partition_json,
-                     row_count, content_sha256, source_id, min_time, max_time)
-                    SELECT ?, ?, ?, relative_path, partition_json, row_count,
-                           content_sha256, coalesce(source_id, ?), min_time, max_time
-                    FROM ingestion_chunks
-                    WHERE run_id = ? AND chunk_key = ?
-                    """,
-                    [
-                        fragment_id,
-                        snapshot_id,
-                        dataset_id,
-                        source_id,
-                        run_id,
-                        chunk_key,
-                    ],
-                )
+                        [snapshot_id, snapshot_id, parent_snapshot_id],
+                    )
+            # Likewise the run's own fragments: one statement, not one per chunk.
+            # Existence was checked above, before the transaction opened.
+            connection.execute(
+                """
+                INSERT INTO fragments
+                (fragment_id, snapshot_id, dataset_id, relative_path, partition_json,
+                 row_count, content_sha256, source_id, min_time, max_time)
+                SELECT 'frag_' || md5(? || chunk_key), ?, ?, relative_path,
+                       partition_json, row_count, content_sha256,
+                       coalesce(source_id, ?), min_time, max_time
+                FROM ingestion_chunks
+                WHERE run_id = ? AND state = 'staged'
+                """,
+                [snapshot_id, snapshot_id, dataset_id, source_id, run_id],
+            )
             connection.execute(
                 """
                 UPDATE snapshots SET state = 'committed', committed_at = current_timestamp
@@ -1143,6 +1108,12 @@ class Catalog:
             for path, partition_json in rows
         ]
 
+    def absolute_raw_path_count(self) -> int:
+        with self.open(read_only=True) as connection:
+            return connection.execute(
+                "SELECT count(*) FROM source_files WHERE starts_with(raw_path, '/')"
+            ).fetchone()[0]
+
     def archived_sources(self, dataset_id: str) -> list[tuple[Any, ...]]:
         """Every archived source this dataset has ever ingested, with its names.
 
@@ -1151,7 +1122,7 @@ class Catalog:
         """
 
         with self.open(read_only=True) as connection:
-            return connection.execute(
+            rows = connection.execute(
                 """
                 SELECT file.raw_path, alias.original_name,
                        alias.publisher_vintage, alias.source_uri,
@@ -1180,6 +1151,9 @@ class Catalog:
                 """,
                 [dataset_id],
             ).fetchall()
+        # `root / path` leaves an already-absolute path alone, so catalogues
+        # written before raw paths became relative still resolve.
+        return [(str(self.paths.root / row[0]), *row[1:]) for row in rows]
 
     def run_chunk_paths(self, run_id: str) -> list[str]:
         """Absolute paths of the fragments this run itself produced."""
