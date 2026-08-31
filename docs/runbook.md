@@ -20,16 +20,20 @@ Install NetCDF support only on machines that ingest reanalysis:
 python -m pip install -e '.[netcdf]'
 ```
 
-## 2. Select exactly one store root
+## 2. Use the local-only store root
 
-Choose a local, non-cloud-synchronized disk with adequate capacity:
+By default, the store is created at `ResearchDataStore/` inside this repository.
+That directory is explicitly ignored by Git, including all raw sources, Parquet
+files and the DuckDB catalogue. No environment setup is required.
+
+To use another local, non-cloud-synchronized disk with adequate capacity, set:
 
 ```bash
 export RESEARCH_DATA_ROOT=/absolute/path/to/research-data
 ```
 
-Put that export in the shell profile used by every analysis repository. Do not
-set repository-relative paths.
+Put that export in the shell profile used by every analysis repository. Use an
+absolute path. An explicit CLI `--store` option takes precedence over it.
 
 ## 3. Initialize and verify
 
@@ -40,9 +44,42 @@ research-store datasets
 python -m pytest
 ```
 
-The station inventory reports `ready`. Sources with unresolved time, unit or
-licensed-schema decisions report `provisional`; this is an intentional stop
-condition, not an installation failure.
+`doctor` prints the store's facts as JSON and then any findings, exiting
+non-zero if it found a `problem`. On a healthy store it reports no absolute
+fragment paths, no missing fragments and no legacy snapshot directories. To
+check the bytes rather than the bookkeeping:
+
+```bash
+research-store doctor --verify-sample 200   # re-hash a sample
+research-store doctor --verify-all          # re-hash everything (slow)
+```
+
+Sources with unresolved time, unit or licensed-schema decisions report
+`provisional`; this is an intentional stop condition, not an installation
+failure.
+
+### Upgrading a store created before 2026-08-31
+
+Older stores filed fragments under `warehouse/<tier>/<dataset>/snapshots/<id>/`
+and catalogued them by absolute path. `doctor` reports both as problems. To
+convert in place:
+
+```bash
+research-store migrate            # dry run: reports what would move
+research-store migrate --apply
+```
+
+The migration is resumable and each batch commits its own catalogue update, so
+it can be interrupted. On a very large store, bound each pass:
+
+```bash
+research-store migrate --apply --budget-seconds 600   # repeat until complete
+```
+
+It reports `"complete": true` when there is nothing left to do. Back up
+`catalog/store.duckdb` first, and if you ever restore that backup, delete
+`catalog/store.duckdb.wal` alongside it — a stale write-ahead log will be
+replayed onto the restored file.
 
 ## 4. Ingest the station relationship table
 
@@ -100,7 +137,22 @@ python -m pytest
 For the all-Canada ECCC hourly archive, the source uses local standard time. The
 ingester uses each station's IANA timezone from `eccc_station_inventory`, removes
 the daylight-saving component, and converts the standard-time interval to UTC.
-It stops if an observation's Climate ID has no station timezone.
+An observation whose Climate ID has no defensible timezone is recorded in
+`ingestion_rejections` and omitted from the UTC observation view; its exact
+source line remains in the immutable raw object. This avoids inventing a UTC
+instant while keeping the source fully auditable.
+
+The DLY04 daily archive is different: its climatological day closes at a fixed
+UTC hour rather than a station-local one, so no timezone lookup is involved and
+`eccc_station_inventory` is not a prerequisite. Each day slot is stored as the
+interval `[day 06:00Z, day+1 06:00Z)`. That boundary is declared as an era rule
+covering 1961-07-01 onward; earlier records closed the maximum- and
+minimum-temperature days at different hours, so they are not covered and
+ingestion stops rather than restamping them with the modern convention. The
+`station_day_class` option must stay `synoptic_24h`: stations that reported at
+morning and afternoon observation times closed their day at station-specific
+clock times that only the historical inspection reports carry. Restrict a file
+to confirmed 24-hour stations with `entity_allowlist` when it mixes both.
 
 ## 6. Ingest immutable sources
 
@@ -112,11 +164,22 @@ research-store ingest eccc_hly01_observations /download/HLY01_RCS_P2019 \
   --publisher-vintage '2019 annual release' \
   --fetched-at '2026-08-29T12:00:00Z'
 
+research-store ingest eccc_dly04_observations /download/DLY04_P2019 \
+  --publisher-vintage '2019 annual release'
+
 research-store ingest hydrometric_flow_daily /download/hydrometric.sqlite \
   --publisher-vintage '2026-Q3'
 
 research-store ingest hydrometric_level_daily /download/hydrometric.sqlite \
   --publisher-vintage '2026-Q3'
+
+research-store ingest hydrometric_discharge_unit_corrected \
+  /download/corrected/snapshot-2026-08-31/corrected_files.tsv \
+  --station-metadata /download/HYDAT/2026-07-17/Hydat.sqlite3 \
+  --max-drainage-area-km2 10 \
+  --source-uri 'https://collaboration.cmc.ec.gc.ca/cmc/hydrometrics/www/UnitValueData/Discharge/corrected/' \
+  --publisher-vintage 'corrected snapshot 2026-08-31' \
+  --fetched-at '2026-08-31T00:00:00Z'
 
 research-store ingest reanalysis_points_hourly /download/reanalysis.nc
 research-store ingest wind_scada_10min /secure/scada.csv
@@ -125,6 +188,17 @@ research-store ingest wind_scada_10min /secure/scada.csv
 The two hydrometric commands intentionally reuse one physical file. Its raw
 SHA-256 object is stored once, while the catalogue records two dataset-specific
 ingestion runs.
+
+The corrected unit-value command streams each selected `.csv.xz` member; it
+does not extract the CSV collection. The optional threshold uses HYDAT
+`STATIONS.DRAINAGE_AREA_GROSS`. Stations that are unmatched or lack that field
+are excluded when a threshold is supplied rather than assigned a guessed area.
+The dataset identifier remains `hydrometric_discharge_unit_corrected`: the
+threshold is recorded in collection provenance and can be changed or omitted on
+a later replacement ingestion. Approval Level, Grade and Qualifiers are
+preserved on every observation, and no ingestion-time quality filtering occurs.
+`qualifiers` is a JSON string array because AQUARIUS can emit more than one
+trailing qualifier field even though the CSV declares one `Qualifiers` heading.
 
 If a command is interrupted, run the identical command again. Completed chunk
 keys are reused and a partial snapshot remains invisible.
@@ -135,13 +209,103 @@ The configured ECCC source elements currently map as follows:
 |---|---|---|
 | `eccc_hly01_observations` | 262-280 | Hourly/15-minute precipitation, gauge weight, 2 m wind and snow depth |
 | `eccc_hly03_observations` | 123 | `precipitation_amount_1h` in mm |
+| `eccc_dly04_observations` | 001-003, 010-012 | Daily maximum, minimum and mean air temperature in degC; rainfall and total precipitation in mm; snowfall in cm |
+
+Element 013, snow on the ground, is deliberately unregistered. The archive
+documents no observation time for it, so it cannot be given an interval without
+guessing. DLY02 shares this record layout and element numbering; it is a
+separate publisher product and needs its own registry entry before its files can
+be ingested.
 
 The physical long table retains `source_element`. Each element declaration owns
 its scale, unit and interval placement. Register additional documented HLY01
 elements, such as temperature, in the same dataset before ingesting a file that
 contains them; undeclared codes stop ingestion.
 
-## 7. Verify provenance and measured cost
+The 2004 HLY01 RCS publisher file contains four `######` value fields for snow
+depth element 275. The documented field is signed numeric, so no numeric value
+can be recovered; these four fields are registered as null sentinels. Their
+blank source quality flags and the original bytes remain available for audit.
+
+Five retired or publisher-only Climate IDs are absent from the current station
+inventory but occur in recent HLY files: `1102259`, `6112335`, `611E001`,
+`6158434`, and `6158435`. Older HLY03 files contain another 37 retired IDs.
+They have evidence-backed timezone overrides based on a uniform ECCC
+climatological district or a named adjacent station; the evidence is stored
+with every override in the registry. An inventory entry that later resolves
+differently causes ingestion to stop on a conflict. The outside-Canada ID
+`9040900` and special ID `9052008` have no defensible location metadata, so
+their records are quarantined instead of being given a guessed UTC conversion.
+
+HLY03 publisher files contain a small number of malformed physical lines. For
+that dataset only, the ingester searches a malformed line for complete,
+structurally valid 186-character records, publishes those recovered records,
+and records the physical line in `ingestion_rejections`. Truncated or invalid
+records with no recoverable observation are quarantined. HLY01 remains strict
+for structural corruption. For both hourly datasets, a daily record on which
+the station's documented standard UTC offset changes is quarantined: the fixed
+24-slot line does not identify how a skipped or repeated civil hour should map
+onto UTC, so coercing it would invent an interval or a duplicate timestamp.
+
+Audit committed rejections with:
+
+```bash
+research-store sql "
+SELECT r.dataset_id, a.original_name, r.record_locator, r.reason,
+       r.raw_length, r.recovered_record_count, r.raw_sha256, r.details_json
+FROM catalog.main.ingestion_rejections AS r
+JOIN catalog.main.ingestion_runs AS i ON i.run_id = r.run_id
+JOIN catalog.main.source_aliases AS a ON a.source_id = r.source_id
+WHERE i.state = 'committed'
+ORDER BY r.dataset_id, a.original_name, r.record_locator"
+```
+
+The source hash and locator point back to the immutable object recorded in
+`catalog.main.source_files`; no malformed bytes are silently discarded.
+
+## 7. Close a production ingestion
+
+Follow the [production ingestion protocol](ingestion-protocol.md). Reconcile
+every supplied physical record to accepted, recovered or quarantined records,
+and add a dated report under `docs/ingestion-reports/` using its template. A
+committed snapshot without that evidence is not a completed production
+ingestion.
+
+Then check the store rather than assuming it:
+
+```bash
+research-store doctor --verify-sample 200
+research-store gc            # reports reclaimable staging and orphans
+research-store gc --apply    # reclaims them
+```
+
+A failed run deliberately keeps its staging so it can resume without
+re-parsing. `gc` is what reclaims the staging of runs that will never resume;
+`doctor` lists them as `abandoned_staging`.
+
+## 7a. Correct data that was published wrong
+
+An append cannot fix a value that was already wrong. Withdraw the affected
+snapshots first, with a reason that will still make sense in a year:
+
+```bash
+research-store supersede eccc_hly01_observations \
+  --reason "snow_depth elements 275-278 were published at scale 1.0; the
+            delivered RCS bytes are hundredths of a centimetre, so every
+            published snow depth was 100x too large. Corrected to scale 0.01
+            in ingester version 10 on 2026-08-31."
+```
+
+Superseded snapshots stop being readable and stop being inherited by the next
+append, but they stay in the catalogue with their reason and keep their
+fragments, so the record of what was published survives. Then re-ingest every
+source file for that dataset; the corrected run starts a clean lineage.
+
+Reading the dataset raises `LookupError` until the re-ingest has published at
+least one snapshot. That is intentional: it is better than serving values known
+to be wrong.
+
+## 8. Verify provenance and measured cost
 
 ```bash
 research-store provenance eccc_hly01_observations
@@ -154,7 +318,7 @@ research-store benchmark eccc_hly01_observations \
 
 Record benchmark JSON when changing entity bucket counts or fragment sizes.
 
-## 8. Read from Python
+## 9. Read from Python
 
 ```python
 from research_store import load
@@ -174,7 +338,7 @@ units = rain.attrs["units"]
 Publication workflows should record `snapshot_id`. Passing it back to `load`
 reproduces the same fragment manifest after later ingestions.
 
-## 9. Use SQL
+## 10. Use SQL
 
 ```bash
 research-store sql \
@@ -206,17 +370,38 @@ FROM eccc_hly03_observations AS p
 JOIN eccc_station_inventory AS s USING (entity_id)
 ```
 
-## 10. Backup
+## 11. Backup and restore
 
 Back up these durable directories together:
 
 ```text
-$RESEARCH_DATA_ROOT/raw
-$RESEARCH_DATA_ROOT/catalog
+ResearchDataStore/raw
+ResearchDataStore/catalog
 ```
 
 Also back up the private registry overlay named by
 `RESEARCH_STORE_PRIVATE_REGISTRY`. Never add it to a public Git repository.
 
-The warehouse is rebuildable, but do not delete it until a complete regeneration
-has been tested from the backed-up raw objects and catalogue metadata.
+### Restoring
+
+Put `raw/` and `catalog/` back — at any path, since catalogue fragment paths
+are relative to the store root — then re-run the ingest for each archived
+source:
+
+```bash
+export RESEARCH_DATA_ROOT=/new/absolute/path
+research-store doctor          # expect: missing_fragments equal to the count in the catalogue
+for object in "$RESEARCH_DATA_ROOT"/raw/objects/sha256/*/*; do
+  : # ingest each object with the same dataset, vintage and ingester it had
+done
+research-store doctor --verify-sample 200
+```
+
+An ingest whose run is already committed verifies that the fragments that run
+produced are present. If they are, it returns immediately and costs nothing. If
+they are missing, it rebuilds them **into the same snapshot**, so the restored
+catalogue and the rebuilt warehouse still describe each other. Fragment paths
+are content-addressed, so a rebuild lands exactly where the catalogue points.
+
+Test a restore into a scratch directory before relying on it. Do not delete the
+warehouse until you have.

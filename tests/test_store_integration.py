@@ -19,7 +19,7 @@ from research_store.foundation.models import (
     TemporalKind,
     VariableSpec,
 )
-from research_store.foundation.pipeline import ingest_file
+from research_store.foundation.pipeline import RejectedRecord, ingest_file
 
 
 def _wide_frame(rows: list[tuple[str, str, float, float]]) -> pd.DataFrame:
@@ -121,6 +121,64 @@ def test_ingest_load_sql_and_provenance(
     provenance = Catalog(store_paths).provenance(wide_spec.dataset_id, snapshot)
     assert provenance[0]["original_name"] == "sensor.csv"
     assert provenance[0]["publisher_vintage"] == "2024-Q1"
+
+
+def test_ingestion_rejections_are_persisted_with_source_locator(
+    tmp_path: Path, store_paths, registry, wide_spec
+) -> None:
+    source = tmp_path / "partially-malformed.txt"
+    source.write_text("source bytes\n")
+    data = _wide_frame(
+        [("0100001", "2024-01-01T00:00:00Z", 10.0, 8.0)]
+    )
+
+    def parser(path, spec, completed):
+        for line_number in (2, 3):
+            yield RejectedRecord(
+                rejection_key=f"line={line_number}:truncated-record",
+                record_locator=f"line:{line_number}",
+                reason="truncated_fixed_width_record",
+                raw_sha256="a" * 64,
+                raw_length=17,
+                details={"expected_width": 186},
+            )
+        yield from chunks_from_frame(
+            data, spec, key_prefix="accepted", completed=completed
+        )
+
+    ingest_file(
+        dataset_id=wide_spec.dataset_id,
+        source_path=source,
+        parser=parser,
+        ingester_version="rejections-1",
+        registry=registry,
+        paths=store_paths,
+    )
+
+    with Catalog(store_paths).open(read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT r.dataset_id, r.record_locator, r.reason, r.raw_sha256,
+                   r.raw_length, r.recovered_record_count, r.details_json,
+                   i.state
+            FROM ingestion_rejections AS r
+            JOIN ingestion_runs AS i USING (run_id)
+            ORDER BY r.record_locator
+            """
+        ).fetchall()
+    assert rows == [
+        (
+            "test_sensor",
+            f"line:{line_number}",
+            "truncated_fixed_width_record",
+            "a" * 64,
+            17,
+            0,
+            '{"expected_width": 186}',
+            "committed",
+        )
+        for line_number in (2, 3)
+    ]
 
 
 def test_long_storage_has_one_unit_safe_logical_api(
