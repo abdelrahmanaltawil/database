@@ -1143,6 +1143,44 @@ class Catalog:
             for path, partition_json in rows
         ]
 
+    def archived_sources(self, dataset_id: str) -> list[tuple[Any, ...]]:
+        """Every archived source this dataset has ever ingested, with its names.
+
+        This is what makes a restore or a correction repeatable: the bytes and
+        the metadata needed to re-present them are both in the catalogue.
+        """
+
+        with self.open(read_only=True) as connection:
+            return connection.execute(
+                """
+                SELECT file.raw_path, alias.original_name,
+                       alias.publisher_vintage, alias.source_uri,
+                       alias.fetched_at::VARCHAR AS fetched_at,
+                       max(run.ingester_version) AS ingester_version
+                FROM ingestion_runs AS run
+                JOIN source_files AS file USING (source_id)
+                LEFT JOIN source_aliases AS alias USING (source_id)
+                WHERE run.dataset_id = ?
+                GROUP BY file.source_id, file.raw_path, alias.alias_id,
+                         alias.original_name, alias.publisher_vintage,
+                         alias.source_uri, alias.fetched_at, alias.recorded_at
+                -- One source can carry several recorded names. Prefer a real
+                -- publisher filename over one that is merely a content digest
+                -- (which is what an ingest pointed straight at the archived
+                -- object records), then the name it was first archived under.
+                QUALIFY row_number() OVER (
+                    PARTITION BY file.source_id
+                    ORDER BY regexp_matches(
+                                 coalesce(alias.original_name, ''),
+                                 '^[0-9a-f]{32,}$'
+                             ) ASC,
+                             alias.recorded_at ASC
+                ) = 1
+                ORDER BY alias.original_name
+                """,
+                [dataset_id],
+            ).fetchall()
+
     def run_chunk_paths(self, run_id: str) -> list[str]:
         """Absolute paths of the fragments this run itself produced."""
 

@@ -701,3 +701,31 @@ def test_an_interrupted_schema_migration_is_undone_and_retried(
         ).fetchone()[0]
     assert "ingestion_runs_old" not in tables
     assert surviving == 1, "the original rows must come back, not the partial copy"
+
+
+def test_archived_sources_prefers_a_publisher_name_over_a_digest(
+    seeded, store_paths, long_spec
+):
+    """A restore must re-present bytes under the name they arrived with.
+
+    An ingest pointed straight at the archived object records the content
+    digest as the filename. That alias is real history and is kept, but it is
+    not the name to replay.
+    """
+
+    catalog = Catalog(store_paths)
+    rows = catalog.archived_sources(long_spec.dataset_id)
+    assert len(rows) == 1
+    assert rows[0][1] == "observations.csv"
+
+    with catalog.open() as connection:
+        source_id = connection.execute("SELECT source_id FROM source_files").fetchone()[0]
+        connection.execute(
+            "INSERT INTO source_aliases (alias_id, source_id, original_name, "
+            "recorded_at) VALUES ('alias_digest', ?, ?, current_timestamp)",
+            [source_id, "b" * 64],
+        )
+
+    rows = catalog.archived_sources(long_spec.dataset_id)
+    assert len(rows) == 1, "one row per archived source, whatever its alias history"
+    assert rows[0][1] == "observations.csv"

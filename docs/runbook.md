@@ -298,8 +298,13 @@ research-store supersede eccc_hly01_observations \
 
 Superseded snapshots stop being readable and stop being inherited by the next
 append, but they stay in the catalogue with their reason and keep their
-fragments, so the record of what was published survives. Then re-ingest every
-source file for that dataset; the corrected run starts a clean lineage.
+fragments, so the record of what was published survives. Then replay every
+archived source for that dataset; the corrected runs start a clean lineage:
+
+```bash
+research-store reingest eccc_hly01_observations --dry-run
+research-store reingest eccc_hly01_observations
+```
 
 Reading the dataset raises `LookupError` until the re-ingest has published at
 least one snapshot. That is intentional: it is better than serving values known
@@ -390,12 +395,16 @@ source:
 
 ```bash
 export RESEARCH_DATA_ROOT=/new/absolute/path
-research-store doctor          # expect: missing_fragments equal to the count in the catalogue
-for object in "$RESEARCH_DATA_ROOT"/raw/objects/sha256/*/*; do
-  : # ingest each object with the same dataset, vintage and ingester it had
-done
-research-store doctor --verify-sample 200
+research-store doctor                                   # missing_fragments > 0
+research-store reingest DATASET --dry-run               # what will be replayed
+research-store reingest DATASET                         # for each dataset
+research-store doctor --verify-sample 200               # expect no problems
 ```
+
+`reingest` reads the archived sources out of the catalogue and hands each back
+to its ingester under the publisher filename it arrived with, so aliases and
+vintages are not invented. It continues past a failure and reports at the end;
+re-run it to resume.
 
 An ingest whose run is already committed verifies that the fragments that run
 produced are present. If they are, it returns immediately and costs nothing. If

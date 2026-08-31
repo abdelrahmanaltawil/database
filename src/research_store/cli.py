@@ -95,6 +95,70 @@ def _ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reingest(args: argparse.Namespace) -> int:
+    """Re-present every archived source of a dataset to the ingester.
+
+    Used after a correction, and to rebuild a warehouse from a restored backup.
+    The archived object is hard-linked under its original publisher filename so
+    the ingest records the same alias it did the first time, rather than a
+    content digest.
+    """
+
+    import os
+    import shutil
+    import tempfile
+
+    paths = _paths(args, for_write=not args.dry_run)
+    sources = Catalog(paths).archived_sources(args.dataset)
+    if not sources:
+        print(f"No archived sources are recorded for {args.dataset!r}", file=sys.stderr)
+        return 1
+    print(f"{len(sources)} archived source(s) for {args.dataset}")
+    if args.dry_run:
+        for raw_path, original_name, vintage, *_ in sources:
+            print(f"  {original_name}\t{vintage or ''}")
+        print("note: nothing was ingested; re-run without --dry-run")
+        return 0
+
+    spec = DEFAULT_REGISTRY.get(args.dataset)
+    ingester = INGESTERS[spec.producer]
+    failures = 0
+    for index, (raw_path, original_name, vintage, uri, fetched, _version) in enumerate(
+        sources, 1
+    ):
+        archived = Path(raw_path)
+        if not archived.is_file():
+            print(f"[{index}/{len(sources)}] {original_name}: archived bytes missing")
+            failures += 1
+            continue
+        with tempfile.TemporaryDirectory() as directory:
+            presented = Path(directory) / (original_name or archived.name)
+            try:
+                os.link(archived, presented)
+            except OSError:
+                shutil.copy2(archived, presented)
+            try:
+                snapshot = ingester(
+                    args.dataset,
+                    presented,
+                    registry=DEFAULT_REGISTRY,
+                    paths=paths,
+                    source_uri=uri,
+                    publisher_vintage=vintage,
+                    fetched_at=fetched,
+                )
+            except Exception as error:  # noqa: BLE001 - report and continue
+                failures += 1
+                print(f"[{index}/{len(sources)}] {original_name}: FAILED {error}")
+                if args.stop_on_error:
+                    return 1
+                continue
+        print(f"[{index}/{len(sources)}] {original_name}: {snapshot}")
+    if failures:
+        print(f"{failures} source(s) failed; re-run to resume", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def _provenance(args: argparse.Namespace) -> int:
     records = Catalog(_paths(args)).provenance(args.dataset, args.snapshot)
     print(json.dumps(records, indent=2, default=str))
@@ -269,6 +333,18 @@ def parser() -> argparse.ArgumentParser:
         help="optional maximum gross drainage area for this ingestion run",
     )
     ingest.set_defaults(handler=_ingest)
+    reingest = subparsers.add_parser(
+        "reingest",
+        help="re-present every archived source of a dataset to its ingester",
+    )
+    reingest.add_argument("dataset")
+    reingest.add_argument("--dry-run", action="store_true", help="list, do not ingest")
+    reingest.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="stop at the first failure instead of continuing",
+    )
+    reingest.set_defaults(handler=_reingest)
     provenance = subparsers.add_parser(
         "provenance", help="resolve sources for a snapshot"
     )
