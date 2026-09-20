@@ -1067,6 +1067,11 @@ class Catalog:
         the snapshot, so a rebuild reproduces exactly the rows the catalogue
         already holds. That is what makes restore-from-raw possible: the
         snapshot keeps its identity instead of being minted again.
+
+        The path half of that guarantee depends on the Parquet writer being
+        fixed, because the digest is taken over the written file rather than
+        over the logical table. `pyarrow` is pinned exactly in pyproject; a
+        rebuild under a different one lands beside the recorded path, not on it.
         """
 
         with self.transaction() as connection:

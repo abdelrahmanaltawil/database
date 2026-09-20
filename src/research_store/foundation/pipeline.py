@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,21 +60,11 @@ def ingest_file(
             publisher_vintage=publisher_vintage,
             fetched_at=fetched_at,
         )
-        run = writer.begin(spec, asset, ingester_version=ingester_version)
+        run = writer.resume_or_rebuild(
+            writer.begin(spec, asset, ingester_version=ingester_version)
+        )
         if run.state == "committed":
-            missing = [
-                path
-                for path in writer.catalog.run_chunk_paths(run.run_id)
-                if not Path(path).is_file()
-            ]
-            if not missing:
-                return run.snapshot_id
-            # The catalogue remembers this ingest but its fragments are gone:
-            # this is a restore from archived bytes. Rebuild into the same
-            # snapshot rather than minting a new identity, so the restored
-            # catalogue and the rebuilt warehouse still describe each other.
-            writer.catalog.reset_run_for_rebuild(run.run_id)
-            run = dataclasses.replace(run, state="running")
+            return run.snapshot_id
 
         completed = writer.catalog.completed_chunk_keys(run.run_id)
         pending_rejections: list[RejectedRecord] = []

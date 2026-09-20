@@ -14,7 +14,14 @@ dependencies = [
   "numpy>=1.26",
   "openpyxl>=3.1",
   "pandas>=2.2",
-  "pyarrow>=17",
+  # Pinned exactly, not floated. A fragment's path is a digest of the
+  # Parquet file it was written to, and every file records its writer in
+  # the footer ("parquet-cpp-arrow version 25.0.1"). A different pyarrow
+  # therefore produces a different digest for identical rows, so a rebuild
+  # would land beside the path the catalogue holds instead of on it, and
+  # restore-from-raw would silently stop working. Change this only
+  # together with a plan for the fragments already published.
+  "pyarrow==25.0.1",
   # DuckDB needs pytz to hand TIMESTAMPTZ values back to Python; without it
   # any fetchall() over a timestamp column raises at runtime.
   "pytz>=2024.1",

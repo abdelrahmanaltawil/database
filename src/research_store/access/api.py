@@ -9,7 +9,12 @@ import duckdb
 import pandas as pd
 
 from research_store.foundation.catalog import Catalog
-from research_store.foundation.models import Registry, StorageModel, TemporalKind
+from research_store.foundation.models import (
+    DatasetSpec,
+    Registry,
+    StorageModel,
+    TemporalKind,
+)
 from research_store.foundation.partitioning import entity_bucket
 from research_store.foundation.paths import resolve_store_paths
 from research_store.foundation.registry import DEFAULT_REGISTRY
@@ -150,6 +155,36 @@ def _logical_select(
     if include_provenance:
         expressions.extend(["_source_id", "_producer_run_id"])
     return f"SELECT {', '.join(expressions)} FROM {relation}"
+
+
+def describe(
+    dataset: str,
+    *,
+    registry: Registry = DEFAULT_REGISTRY,
+) -> DatasetSpec:
+    """Return the declared specification for one dataset.
+
+    The registry is the sole declaration site for dataset layout and semantics,
+    so this is the authoritative answer to what a dataset holds: its variables
+    with their quantities, units and dtypes, the quality field bound to each,
+    the entity and time fields, the timestamp semantics, the publisher sentinel
+    rules and the source documentation.
+
+    This is pure. It opens no store and touches no filesystem, so a consumer can
+    validate its configuration against the declaration before any store exists.
+    Snapshot identity is store-dependent and is reported by :func:`load` instead,
+    in ``frame.attrs["snapshot_id"]``.
+
+    Unlike :func:`load` this does not refuse a provisional dataset: why a dataset
+    is provisional is part of what it describes, in ``readiness`` and
+    ``unresolved_decisions``. Callers that intend to read data should still let
+    :func:`load` enforce readiness.
+
+    Raises:
+        KeyError: The dataset is not declared; the message lists what is.
+    """
+
+    return registry.get(dataset)
 
 
 def load(

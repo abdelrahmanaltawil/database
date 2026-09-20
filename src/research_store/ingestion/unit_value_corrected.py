@@ -336,106 +336,108 @@ def ingest(
         )
     spec = registry.get(dataset_id)
     spec.require_ready()
-    writer = StoreWriter(paths, registry)
-    selection = select_sources(
-        source_path,
-        station_metadata,
-        spec,
-        max_drainage_area_km2=max_drainage_area_km2,
-    )
-    manifest_asset = writer.archive_source(
-        Path(source_path),
-        source_uri=source_uri,
-        publisher_vintage=publisher_vintage,
-        fetched_at=fetched_at,
-    )
-    metadata_asset = writer.archive_source(
-        Path(station_metadata),
-        source_uri=str(spec.ingest_options["station_metadata_uri"]),
-        publisher_vintage=publisher_vintage,
-        fetched_at=fetched_at,
-    )
-    members: list[tuple[UnitValueSource, SourceAsset]] = []
-    for source in selection.sources:
-        members.append(
-            (
-                source,
-                writer.archive_source(
-                    source.path,
-                    source_uri=source.source_uri,
-                    publisher_vintage=publisher_vintage,
-                    fetched_at=fetched_at,
-                ),
+    with StoreWriter(paths, registry) as writer:
+        selection = select_sources(
+            source_path,
+            station_metadata,
+            spec,
+            max_drainage_area_km2=max_drainage_area_km2,
+        )
+        manifest_asset = writer.archive_source(
+            Path(source_path),
+            source_uri=source_uri,
+            publisher_vintage=publisher_vintage,
+            fetched_at=fetched_at,
+        )
+        metadata_asset = writer.archive_source(
+            Path(station_metadata),
+            source_uri=str(spec.ingest_options["station_metadata_uri"]),
+            publisher_vintage=publisher_vintage,
+            fetched_at=fetched_at,
+        )
+        members: list[tuple[UnitValueSource, SourceAsset]] = []
+        for source in selection.sources:
+            members.append(
+                (
+                    source,
+                    writer.archive_source(
+                        source.path,
+                        source_uri=source.source_uri,
+                        publisher_vintage=publisher_vintage,
+                        fetched_at=fetched_at,
+                    ),
+                )
+            )
+        fingerprint = _selection_fingerprint(
+            manifest=manifest_asset,
+            station_metadata=metadata_asset,
+            max_drainage_area_km2=max_drainage_area_km2,
+            members=members,
+        )
+        run = writer.resume_or_rebuild(
+            writer.begin(
+                spec,
+                manifest_asset,
+                ingester_version=f"{VERSION}+selection.{fingerprint}",
             )
         )
-    fingerprint = _selection_fingerprint(
-        manifest=manifest_asset,
-        station_metadata=metadata_asset,
-        max_drainage_area_km2=max_drainage_area_km2,
-        members=members,
-    )
-    run = writer.begin(
-        spec,
-        manifest_asset,
-        ingester_version=f"{VERSION}+selection.{fingerprint}",
-    )
-    if run.state == "committed":
-        return run.snapshot_id
-    writer.catalog.record_ingestion_input(
-        run_id=run.run_id,
-        input_key="publisher_manifest",
-        source_id=manifest_asset.source_id,
-        input_role="publisher_manifest",
-        details={
-            "manifest_count": selection.manifest_count,
-            "selected_count": len(selection.sources),
-            "unmatched_station_count": selection.unmatched_station_count,
-            "missing_drainage_area_count": selection.missing_drainage_area_count,
-            "excluded_by_area_count": selection.excluded_by_area_count,
-        },
-    )
-    writer.catalog.record_ingestion_input(
-        run_id=run.run_id,
-        input_key="station_metadata",
-        source_id=metadata_asset.source_id,
-        input_role="selection_metadata",
-        details={
-            "drainage_area_field": spec.ingest_options["drainage_area_column"],
-            "max_drainage_area_km2": max_drainage_area_km2,
-        },
-    )
-    for source, asset in members:
+        if run.state == "committed":
+            return run.snapshot_id
         writer.catalog.record_ingestion_input(
             run_id=run.run_id,
-            input_key=f"member:{source.region}/{source.filename}",
-            source_id=asset.source_id,
-            input_role="observation_source",
+            input_key="publisher_manifest",
+            source_id=manifest_asset.source_id,
+            input_role="publisher_manifest",
             details={
-                "station_id": source.station_id,
-                "drainage_area_gross_km2": source.drainage_area_gross_km2,
-                "publisher_modified": source.publisher_modified,
-                "publisher_listed_size": source.publisher_listed_size,
+                "manifest_count": selection.manifest_count,
+                "selected_count": len(selection.sources),
+                "unmatched_station_count": selection.unmatched_station_count,
+                "missing_drainage_area_count": selection.missing_drainage_area_count,
+                "excluded_by_area_count": selection.excluded_by_area_count,
             },
         )
-    completed = writer.catalog.completed_chunk_keys(run.run_id)
-    try:
+        writer.catalog.record_ingestion_input(
+            run_id=run.run_id,
+            input_key="station_metadata",
+            source_id=metadata_asset.source_id,
+            input_role="selection_metadata",
+            details={
+                "drainage_area_field": spec.ingest_options["drainage_area_column"],
+                "max_drainage_area_km2": max_drainage_area_km2,
+            },
+        )
         for source, asset in members:
-            for chunk in parse(
-                asset.raw_path,
-                spec,
-                completed,
-                station_id=source.station_id,
-                source_key=asset.sha256[:20],
-            ):
-                writer.write_chunk(
-                    run=run,
-                    spec=spec,
-                    source=asset,
-                    chunk_key=chunk.chunk_key,
-                    table=chunk.table,
-                    partition=chunk.partition,
-                )
-        return writer.publish(run=run, spec=spec, source=manifest_asset)
-    except BaseException as error:
-        writer.catalog.mark_run_failed(run.run_id, repr(error))
-        raise
+            writer.catalog.record_ingestion_input(
+                run_id=run.run_id,
+                input_key=f"member:{source.region}/{source.filename}",
+                source_id=asset.source_id,
+                input_role="observation_source",
+                details={
+                    "station_id": source.station_id,
+                    "drainage_area_gross_km2": source.drainage_area_gross_km2,
+                    "publisher_modified": source.publisher_modified,
+                    "publisher_listed_size": source.publisher_listed_size,
+                },
+            )
+        completed = writer.catalog.completed_chunk_keys(run.run_id)
+        try:
+            for source, asset in members:
+                for chunk in parse(
+                    asset.raw_path,
+                    spec,
+                    completed,
+                    station_id=source.station_id,
+                    source_key=asset.sha256[:20],
+                ):
+                    writer.write_chunk(
+                        run=run,
+                        spec=spec,
+                        source=asset,
+                        chunk_key=chunk.chunk_key,
+                        table=chunk.table,
+                        partition=chunk.partition,
+                    )
+            return writer.publish(run=run, spec=spec, source=manifest_asset)
+        except BaseException as error:
+            writer.catalog.mark_run_failed(run.run_id, repr(error))
+            raise

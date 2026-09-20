@@ -15,6 +15,7 @@ from research_store.foundation.paths import StorePaths
 from research_store.foundation.catalog import Catalog
 from research_store.foundation.pipeline import ParsedChunk, RejectedRecord
 from research_store.foundation.registry import DEFAULT_REGISTRY
+from research_store.foundation.writer import _HELD_LOCKS
 from research_store.ingestion import (
     fixed_width_daily,
     fixed_width_hourly,
@@ -1019,3 +1020,76 @@ def test_hydrometric_sqlite_inventory_derives_timezones_and_preserves_identifier
     ]
     assert frame["timezone_source"].str.startswith("timezonefinder ").all()
 
+
+
+def _corrected_collection(tmp_path: Path) -> tuple[Path, Path]:
+    """The smallest publishable corrected unit-value collection."""
+
+    root = tmp_path / "corrected"
+    (root / "02").mkdir(parents=True)
+    name = "Discharge.Working@02BF013.20110101_corrected.csv.xz"
+    _unit_value_source(
+        root / "02" / name,
+        "02BF013",
+        ["2011-01-01T00:00:00Z,2010-12-31 19:00:00,0.01,Approved,20,ICE"],
+    )
+    manifest = root / "corrected_files.tsv"
+    manifest.write_text(
+        "region\tfilename\tpublisher_modified\tpublisher_listed_size\tsource_url\n"
+        f"02\t{name}\t2026-08-31 00:00\t1K\thttps://example/{name}\n"
+    )
+    hydat = tmp_path / "Hydat.sqlite3"
+    with sqlite3.connect(hydat) as connection:
+        connection.execute(
+            "CREATE TABLE STATIONS "
+            "(STATION_NUMBER TEXT, DRAINAGE_AREA_GROSS DOUBLE)"
+        )
+        connection.execute("INSERT INTO STATIONS VALUES (?, ?)", ("02BF013", 0.53))
+    return manifest, hydat
+
+
+def test_corrected_unit_value_ingest_releases_the_store_write_lock(
+    tmp_path: Path,
+) -> None:
+    """A writer that leaks its lock shuts the store to every later process."""
+
+    manifest, hydat = _corrected_collection(tmp_path)
+    unit_value_corrected.ingest(
+        "hydrometric_discharge_unit_corrected",
+        manifest,
+        station_metadata=hydat,
+        registry=DEFAULT_REGISTRY,
+        paths=StorePaths(tmp_path / "store"),
+    )
+    assert not _HELD_LOCKS, "the corrected unit-value ingest leaked its write lock"
+
+
+def test_corrected_unit_value_ingest_rebuilds_fragments_a_restore_lost(
+    tmp_path: Path,
+) -> None:
+    """A committed run with no fragments on disk is a restore, not a no-op."""
+
+    manifest, hydat = _corrected_collection(tmp_path)
+    paths = StorePaths(tmp_path / "store")
+    arguments = {
+        "station_metadata": hydat,
+        "registry": DEFAULT_REGISTRY,
+        "paths": paths,
+    }
+    snapshot = unit_value_corrected.ingest(
+        "hydrometric_discharge_unit_corrected", manifest, **arguments
+    )
+    fragments = Catalog(paths).snapshot_fragment_paths(snapshot)
+    assert fragments
+    for fragment in fragments:
+        Path(fragment).unlink()
+
+    rebuilt = unit_value_corrected.ingest(
+        "hydrometric_discharge_unit_corrected", manifest, **arguments
+    )
+    assert rebuilt == snapshot, "a restore must not mint a new snapshot identity"
+    assert all(Path(fragment).is_file() for fragment in fragments)
+    frame = load(
+        "hydrometric_discharge_unit_corrected", snapshot=snapshot, store=paths.root
+    )
+    assert frame["discharge"].tolist() == [0.01]

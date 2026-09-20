@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import hashlib
 import json
@@ -243,6 +244,32 @@ class StoreWriter:
             parent_snapshot_ids=parent_snapshot_ids,
         )
 
+    def resume_or_rebuild(self, run: RunRecord) -> RunRecord:
+        """Return a run ready to write, rebuilding one whose fragments are gone.
+
+        A committed run is normally nothing to do: its bytes are published and
+        the caller can return the snapshot. But a catalogue restored beside an
+        empty warehouse reports its runs as committed too, and returning early
+        there writes nothing while reporting success — the exact failure that
+        made the first backup unrestorable. Every producer must ask this, so it
+        lives on the writer rather than in one ingestion path.
+        """
+
+        if run.state != "committed":
+            return run
+        missing = [
+            path
+            for path in self.catalog.run_chunk_paths(run.run_id)
+            if not Path(path).is_file()
+        ]
+        if not missing:
+            return run
+        # Rebuild into the SAME snapshot rather than minting a new identity, so
+        # the restored catalogue and the rebuilt warehouse still describe each
+        # other.
+        self.catalog.reset_run_for_rebuild(run.run_id)
+        return dataclasses.replace(run, state="running")
+
     # ------------------------------------------------------------------
     # Fragment paths
     # ------------------------------------------------------------------
@@ -266,6 +293,15 @@ class StoreWriter:
     def _final_path(
         self, spec: DatasetSpec, partition: dict[str, Any], content_sha256: str
     ) -> Path:
+        """Where a fragment lives, named by the digest of its written bytes.
+
+        This is what lets a rebuild land exactly where the catalogue already
+        points, but it holds only while the Parquet writer is fixed: the footer
+        carries its own version string, so a different pyarrow gives identical
+        rows a different digest and a different path. `pyarrow` is pinned
+        exactly in pyproject for that reason.
+        """
+
         components = [f"{key}={partition[key]}" for key in spec.partition_keys]
         return (
             self.paths.data_dir(self._tier(spec), spec.dataset_id)

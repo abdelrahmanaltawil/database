@@ -20,6 +20,7 @@ from research_store.foundation.models import (
     VariableSpec,
 )
 from research_store.foundation.pipeline import RejectedRecord, ingest_file
+from research_store.foundation.writer import _HELD_LOCKS
 
 
 def _wide_frame(rows: list[tuple[str, str, float, float]]) -> pd.DataFrame:
@@ -423,3 +424,88 @@ def test_derived_snapshot_has_transitive_source_provenance(
     assert result["mean_power"].tolist() == [2.0]
     provenance = Catalog(store_paths).provenance(derived_spec.dataset_id, derived)
     assert [record["original_name"] for record in provenance] == ["parent.csv"]
+
+
+def test_a_derived_materialization_releases_its_lock_and_rebuilds(
+    tmp_path: Path, store_paths, wide_spec
+) -> None:
+    """Derived output owes the same two guarantees as file ingestion.
+
+    A leaked write lock shuts the store to the next process, and a committed
+    run whose fragments a restore lost must rebuild them rather than return a
+    snapshot id for rows that are no longer on disk.
+    """
+
+    derived_spec = DatasetSpec(
+        dataset_id="mean_power",
+        description="Synthetic derived result",
+        kind=DatasetKind.DERIVED,
+        producer="test_mean",
+        storage_model=StorageModel.WIDE,
+        temporal_kind=TemporalKind.INTERVAL,
+        native_frequency="1 day",
+        variables=(VariableSpec("mean_power", "mean active power", "kW"),),
+        snapshot_mode="replace",
+        entity_buckets=8,
+    )
+    registry = Registry([wide_spec, derived_spec])
+    source = tmp_path / "parent.csv"
+    source.write_text("parent source")
+    parent_frame = _wide_frame([("A", "2024-01-01T00:00:00Z", 2.0, 3.0)])
+
+    def parent_parser(path, spec, completed):
+        yield from chunks_from_frame(
+            parent_frame, spec, key_prefix="parent", completed=completed
+        )
+
+    parent = ingest_file(
+        dataset_id=wide_spec.dataset_id,
+        source_path=source,
+        parser=parent_parser,
+        ingester_version="v1",
+        registry=registry,
+        paths=store_paths,
+    )
+    derived_frame = pd.DataFrame(
+        {
+            "entity_id": pd.Series(["A"], dtype="string"),
+            "time_start": [pd.Timestamp("2024-01-01", tz="UTC")],
+            "time_end": [pd.Timestamp("2024-01-02", tz="UTC")],
+            "mean_power": pd.Series([2.0], dtype="float64"),
+        }
+    )
+
+    def derived_chunks(completed):
+        yield from chunks_from_frame(
+            derived_frame, derived_spec, key_prefix="mean", completed=completed
+        )
+
+    arguments = {
+        "dataset_id": derived_spec.dataset_id,
+        "parent_snapshot_ids": [parent],
+        "query": {"operation": "daily_mean", "variable": "power"},
+        "producer_version": "test-1",
+        "chunks": derived_chunks,
+        "registry": registry,
+        "paths": store_paths,
+    }
+    derived = materialize(**arguments)
+    assert not _HELD_LOCKS, "materialize leaked the store write lock"
+
+    fragments = Catalog(store_paths).snapshot_fragment_paths(derived)
+    assert fragments
+    for fragment in fragments:
+        Path(fragment).unlink()
+
+    rebuilt = materialize(**arguments)
+    assert rebuilt == derived, "a restore must not mint a new snapshot identity"
+    assert all(Path(fragment).is_file() for fragment in fragments)
+    assert not _HELD_LOCKS
+    result = load(
+        derived_spec.dataset_id,
+        variable="mean_power",
+        snapshot=derived,
+        store=store_paths.root,
+        registry=registry,
+    )
+    assert result["mean_power"].tolist() == [2.0]

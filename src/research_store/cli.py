@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import textwrap
 import time
 from pathlib import Path
 
-from research_store.access.api import connect, load
+from research_store.access.api import connect, describe, load
 from research_store.foundation.catalog import Catalog
 from research_store.foundation.maintenance import (
     collect_garbage,
@@ -19,6 +20,7 @@ from research_store.foundation.paths import (
     looks_cloud_synced,
     resolve_store_paths,
 )
+from research_store.foundation.models import TemporalKind
 from research_store.foundation.registry import DEFAULT_REGISTRY
 from research_store.foundation.writer import StoreWriteLock
 from research_store.ingestion import (
@@ -308,6 +310,134 @@ def _benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _field(label: str, value: object, *, indent: str = "    ", width: int = 20) -> list[str]:
+    """One label/value row, wrapping long prose under a hanging indent."""
+
+    text = "-" if value in (None, "") else str(value)
+    head = f"{indent}{label:<{width}}"
+    return textwrap.wrap(
+        text, width=96, initial_indent=head, subsequent_indent=" " * len(head)
+    ) or [head.rstrip()]
+
+
+def _format_spec(spec, *, verbose: bool = False) -> str:
+    """Render one dataset declaration for a person reading a terminal."""
+
+    out: list[str] = [spec.dataset_id]
+    out += textwrap.wrap(spec.description, width=96,
+                         initial_indent="  ", subsequent_indent="  ")
+    out.append(
+        f"  {spec.kind.value} | {spec.storage_model.value} storage | "
+        f"{spec.temporal_kind.value} | producer {spec.producer} | {spec.readiness.value}"
+    )
+    for decision in spec.unresolved_decisions:
+        out += textwrap.wrap(f"unresolved: {decision}", width=96,
+                             initial_indent="  ", subsequent_indent="    ")
+
+    if spec.variables:
+        out += ["", "  variables"]
+        name_w = max(len(item.name) for item in spec.variables)
+        qty_w = max(len(item.quantity) for item in spec.variables)
+        unit_w = max(len(item.unit or "-") for item in spec.variables)
+        for variable in spec.variables:
+            row = (
+                f"    {variable.name:<{name_w}}  {variable.quantity:<{qty_w}}  "
+                f"{(variable.unit or '-'):<{unit_w}}  {variable.dtype}"
+            )
+            if variable.quality_field:
+                row += f"  quality={variable.quality_field}"
+            if not variable.nullable:
+                row += "  not-null"
+            out.append(row)
+            if variable.plausible_band is not None:
+                out.append(
+                    f"    {'':<{name_w}}  plausible: {variable.plausible_band.describe()}"
+                )
+
+    if spec.annotations:
+        out += ["", "  annotations"]
+        name_w = max(len(item.name) for item in spec.annotations)
+        for annotation in spec.annotations:
+            out += _field(
+                f"{annotation.name:<{name_w}}  {annotation.dtype:<7}",
+                annotation.meaning,
+                width=name_w + 11,
+            )
+
+    out += ["", "  keys"]
+    out += _field("entity", spec.entity_field)
+    if spec.temporal_kind is not TemporalKind.REFERENCE:
+        span = spec.time_start_field or "-"
+        if spec.time_end_field:
+            span += f" .. {spec.time_end_field}"
+        out += _field("time", span)
+    partitions = ", ".join(spec.partition_keys) or "-"
+    if "entity_bucket" in spec.partition_keys:
+        partitions += f"  (entity_buckets={spec.entity_buckets})"
+    out += _field("partitions", partitions)
+    out += _field("snapshots", spec.snapshot_mode)
+    if spec.coordinate_convention:
+        out += _field("coordinates", spec.coordinate_convention)
+
+    if spec.temporal_kind is not TemporalKind.REFERENCE:
+        out += ["", "  time"]
+        out += _field("native frequency", spec.native_frequency)
+        out += _field("source timezone", spec.source_timezone)
+        out += _field("canonical timezone", spec.canonical_timezone)
+        out += _field("semantics", spec.timestamp_semantics)
+
+    if spec.sentinel_rules:
+        out += ["", "  sentinels"]
+        for rule in spec.sentinel_rules:
+            target = "null" if rule.replacement is None else f"{rule.replacement:g}"
+            window = ""
+            if rule.start or rule.end:
+                window = f"  [{rule.start or '...'}, {rule.end or '...'})"
+            out += _field(str(rule.marker), f"{rule.meaning} -> {target}{window}", width=10)
+            if verbose and rule.evidence:
+                out += _field("", rule.evidence, indent="      ", width=8)
+
+    if spec.documentation is not None:
+        doc = spec.documentation
+        out += ["", "  documentation"]
+        out += _field("source format", doc.source_format)
+        out += _field("quality control", doc.quality_control)
+        if doc.quality_flags:
+            out.append("    quality flags")
+            code_w = max(len(code) for code in doc.quality_flags)
+            for code, meaning in doc.quality_flags.items():
+                out += _field(code, meaning, indent="      ", width=code_w + 2)
+        sections = (
+            ("limitations", doc.limitations),
+            ("notes", doc.notes),
+            ("references", doc.references),
+        )
+        if verbose:
+            for label, items in sections:
+                if items:
+                    out.append(f"    {label}")
+                    for item in items:
+                        out += textwrap.wrap(item, width=96,
+                                             initial_indent="      - ",
+                                             subsequent_indent="        ")
+        else:
+            counts = ", ".join(f"{len(items)} {label}" for label, items in sections if items)
+            if counts:
+                out.append(f"    ({counts}; --verbose to print)")
+
+    out += ["", f"  identity  {spec.identity_digest}"]
+    return "\n".join(out)
+
+
+def _describe(args: argparse.Namespace) -> int:
+    spec = describe(args.dataset)
+    if args.json:
+        print(json.dumps(spec.serializable(), indent=2, default=str))
+    else:
+        print(_format_spec(spec, verbose=args.verbose))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="research-store")
     root.add_argument("--store", type=Path, help=f"override {STORE_ENV}")
@@ -316,6 +446,18 @@ def parser() -> argparse.ArgumentParser:
     init.set_defaults(handler=_init)
     datasets = subparsers.add_parser("datasets", help="list registry declarations")
     datasets.set_defaults(handler=_datasets)
+    describe_parser = subparsers.add_parser(
+        "describe", help="show one dataset's declared schema and semantics"
+    )
+    describe_parser.add_argument("dataset")
+    describe_parser.add_argument(
+        "--json", action="store_true", help="emit the declaration as JSON"
+    )
+    describe_parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="print references, limitations and notes in full",
+    )
+    describe_parser.set_defaults(handler=_describe)
     ingest = subparsers.add_parser("ingest", help="ingest one immutable source file")
     ingest.add_argument("dataset")
     ingest.add_argument("source", type=Path)
