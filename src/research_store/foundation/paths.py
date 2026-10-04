@@ -36,6 +36,26 @@ class StorePaths:
         return self.root / "warehouse"
 
     @property
+    def downloads(self) -> Path:
+        """Publisher downloads awaiting ingestion, one directory per source.
+
+        The store never catalogues this directory, but it is not uniformly
+        disposable: it also holds delivered publisher downloads that ingestion
+        reports cite for reproduction. Only a `research-store fetch` cache
+        (``downloads/<dataset>/`` of an API-acquired dataset) is rebuildable,
+        because its ingest archives every byte it read into ``raw/``.
+        """
+
+        return self.root / "downloads"
+
+    def raw_object(self, sha256: str) -> Path:
+        """Where the archived bytes with this SHA-256 live."""
+
+        if len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+            raise ValueError(f"Not a lowercase SHA-256 hex digest: {sha256!r}")
+        return self.raw / "objects" / "sha256" / sha256[:2] / sha256[2:]
+
+    @property
     def staging(self) -> Path:
         return self.root / "staging"
 

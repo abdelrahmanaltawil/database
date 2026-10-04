@@ -16,9 +16,12 @@ native frequency, source timezone and timestamp labelling convention.
 
 ```mermaid
 flowchart TD
-    CLI[CLI composition root] --> ING[Ingestion adapters]
+    CLI[CLI composition root] --> ACQ[Acquisition]
+    CLI --> ING[Ingestion adapters]
     CLI --> DER[Derived producers]
     CLI --> API[Access API]
+    ACQ --> ING
+    ACQ --> FND
     ING --> FND[Foundation]
     DER --> FND
     API --> FND
@@ -30,14 +33,36 @@ resolution, schemas, conventions, partitioning, hashing, the catalogue,
 checkpoints and the only Parquet writer.
 An ingester parses one external format and emits canonical Arrow chunks. A
 derived producer emits the same chunks but records parent snapshots and its
-query. The access layer reads committed catalogue entries only.
+query. The access layer reads committed catalogue entries only. An acquisition
+module downloads a publisher API's responses into `downloads/` and writes a
+selection manifest in the format its ingestion module declares; it never
+touches the catalogue.
 
 `tests/test_architecture.py` parses the Python syntax tree and fails when:
 
-- the foundation imports access, ingestion or derived code;
-- an ingestion module imports another ingestion module or the access layer;
-- a public dataset is declared outside `foundation/registry.py`; or
-- Parquet is written outside `foundation/writer.py`.
+- the foundation imports access, acquisition, ingestion or derived code;
+- an ingestion module imports another ingestion module, acquisition or the
+  access layer;
+- an acquisition module imports anything of the store but foundation and
+  ingestion, or anything but the CLI imports acquisition;
+- a public dataset is declared outside `foundation/registry.py`;
+- Parquet is written outside `foundation/writer.py`; or
+- any module outside `acquisition/` imports a network client
+  (`urllib.request`, `http.client`, `socket`, `requests`, `httpx`, `urllib3`).
+
+### Acquisition is separate from ingestion
+
+Most sources arrive as delivered files. A source that the store downloads from
+a publisher API is acquired in a separate step, `research-store fetch`, which
+runs the `acquisition` layer and writes only the `downloads/<dataset>/` cache:
+every response body under its content digest, and a selection manifest naming
+each response with its request URL, retrieval time, HTTP date, server and
+SHA-256. Ingestion then reads the manifest offline. It never opens a socket, it
+archives the manifest and every response in `raw/` exactly as they were
+received, and it resolves a member from `raw/` when the cache is gone, so
+`reingest` and a restore replay the same bytes. The ingestion module owns the
+declared query and the manifest format, and the acquisition module imports
+them from it; only the acquisition layer may import a network client.
 
 The CLI is the composition root and is the only layer allowed to import the
 independent application layers together.
@@ -54,8 +79,23 @@ ResearchDataStore/
 │   └── derived/<dataset>/data/<partition>/part-<content-digest>.parquet
 ├── staging/runs/<run>/part-<chunk-digest>.parquet
 ├── catalog/store.duckdb
-└── locks/write.lock
+├── locks/write.lock
+└── downloads/                      (never catalogued)
+    ├── <delivery>/...                delivered publisher downloads
+    └── <dataset>/                    a `fetch` cache, e.g. eccc_climate_hourly_observations
+        ├── <retrieved>_<digest>.tsv  selection manifests
+        ├── pages/<station>/...       publisher responses by content digest
+        ├── cache-index.tsv
+        └── fetch-log.jsonl
 ```
+
+`downloads/` is never catalogued, and `doctor` and `gc` ignore it, but it is
+not uniformly disposable. It holds delivered publisher downloads, which
+ingestion reports cite in their reproduction commands and which should be
+kept, beside the caches `research-store fetch` writes for an API-acquired
+dataset. Only such a fetch cache, `downloads/<dataset>/`, is rebuildable: its
+ingest archives every byte it read into `raw/`, so it may be deleted once its
+manifests have been ingested.
 
 **A fragment belongs to a dataset, not to a snapshot.** A snapshot is a
 catalogue manifest naming fragments; it has no directory. This is deliberate.
@@ -89,7 +129,9 @@ An ingest whose run is already committed checks that the fragments that run
 produced are actually present. If they are, it returns immediately. If they are
 gone, it rebuilds them **into the same snapshot**, rather than minting a new
 snapshot identity that the restored catalogue could never match. Only that
-property makes the two backed-up directories sufficient.
+property makes the two backed-up directories sufficient. The rebuilt snapshot
+keeps its original commit time (and a supersession), so rebuilding an older
+replacement snapshot never makes it the live one.
 
 The default is the Git-ignored `ResearchDataStore/` directory at the repository
 root. The resolution chain is:
@@ -176,6 +218,38 @@ canonical timestamp is the publisher's explicit UTC instant and native cadence
 is left unset because cadence varies. A gross-drainage-area ceiling can select a
 working subset, but the threshold and selected area values are recorded with
 the run rather than embedded in the dataset identifier or registry declaration.
+
+`eccc_climate_hourly_observations` is the public hourly climate product from
+the MSC GeoMet `climate-hourly` API. Each source row is one synchronized
+station-hour carrying many quantities, so it is wide: numeric variables with a
+quality field per variable sourced from the publisher's `*_FLAG` columns, a
+string variable for the present-weather text, and annotations for the
+publisher's `STN_ID` and record-level `FLAG`. It shares the Climate ID
+`entity_id` and the station-inventory timezone rules with the HLY datasets
+(the rules live once in `foundation/station_time.py`). `LOCAL_DATE` H is the
+observation time, and the hourly precipitation total is for the hour ending
+then, so each row is keyed by `[H-1h, H)` LST and every other variable sits at
+the slot's end; the registry declares each variable's placement
+(`variable_timing`). H is on the half hour at UTC-3:30 (Newfoundland)
+stations. The publisher's own `UTC_DATE` is cross-checked against the converted
+observation time, `time_end`, and a disagreeing record is quarantined. Wind
+direction arrives in tens of degrees; each raw value must be an integer from 0
+to 36, it is stored in degrees true with the scale declared in the registry,
+and the calm `0` has no direction (null). A missing-value marker applies only
+to the fields its evidence covers (`sentinel_variables`): `NA` in a numeric
+field stops ingestion instead of becoming null.
+
+The dataset is a replacement collection: the selection manifest written by
+`fetch` is the run's source, and every response is an ingestion input with a
+role (`selection_manifest`, `observation_source`, `completeness_evidence`). A
+replacement that would hide hours readers can currently see, the `LOCAL_DATE`
+range each published window actually held, is refused unless
+`--allow-selection-shrink` is given. `reingest` replays manifests oldest first
+and does not measure one that was published before against the newer snapshot
+it precedes; one that was refused is refused again. A window retrieved less
+than the registry's `settle_days` after it ended can still gain hours, so
+`fetch` asks for it again rather than reusing its cache, and the run records
+whether each window was settled.
 
 `eccc_dly04_observations` is the daily counterpart and is long-form for the same
 reason. Its climatological day is a fixed UTC boundary rather than a
@@ -343,12 +417,33 @@ measurements. No size or timing estimate has been invented from filenames.
 | Deleting live data while tidying up | Fragments are not filed under snapshot directories, so no directory looks disposable; `gc` reclaims only what no snapshot references |
 | Two writers at once | An exclusive lock is taken before any bytes are written |
 | Materialising a billion rows by accident | `load()` sizes a read from catalogue metadata and refuses one wider than `max_rows` |
+| A truncated API transfer | `Content-Length` is checked, pages must end in CRLF, and each window's rows must equal the `resulttype=hits` count or nothing is published |
+| Publisher UTC disagreeing with the station-inventory conversion | The record is quarantined with both timestamps rather than placed by either |
+| A tens-of-degrees wind direction read as degrees | The scale is declared per variable, every raw direction must be an integer 0-36, and the registry test requires 36 times the scale to be 360 |
+| A marker applied to fields it was never observed in | Each sentinel is scoped to named variables; a numeric `NA` is refused as not a number |
+| Calm read as a bearing of 0 degrees | The publisher's calm `0` is a `not_applicable` sentinel for wind direction only, stored as null |
+| An hourly total filed in the hour after it fell | `LOCAL_DATE` is declared as the slot end (`local_time_labels`), cross-checked against `UTC_DATE`, and each variable's placement is declared |
+| A half-hour `LOCAL_DATE` (UTC-3:30) outside an hourly filter | Requests end one second before the next window, and a half-hour time is placed by the station's offset and the publisher's UTC hour |
+| A still-growing window reused from the download cache | A window is reused only if it had ended `settle_days` before retrieval; otherwise `fetch` asks again |
+| A rebuild making an older replacement snapshot live | A rebuilt snapshot keeps its original commit time |
+| Header drift in an API response | The exact 41-column header is declared; any difference stops fetch and ingest |
+| A change in the API's `datetime` semantics | Every row must fall inside the LST window it was requested for; one outside stops ingestion |
+| A replacement snapshot that silently covers less | A new GeoMet selection must cover the `LOCAL_DATE` range each window of the published snapshot held unless `--allow-selection-shrink` is passed; `reingest` exempts only selections that were published before |
+| A request that differs from the declared query | The manifest's request URLs are rebuilt from the registry and must match exactly |
 
 ## Decisions deliberately unresolved
 
 `eccc_station_inventory`, `eccc_hly01_observations`, `eccc_hly03_observations`,
-`eccc_dly04_observations`, `hydrometric_station_inventory` and
-`hydrometric_discharge_unit_corrected` are ready. `eccc_dly04_observations` is
+`eccc_dly04_observations`, `eccc_climate_hourly_observations`,
+`hydrometric_station_inventory` and `hydrometric_discharge_unit_corrected` are
+ready. `eccc_hly01_observations` and `eccc_climate_hourly_observations` both
+carry element 262 as `precipitation_amount_1h` with identical values, but
+HLY01 still files source slot H at `[H, H+1)`, one hour after the hour the
+total covers; its documentation records this, and correcting it needs a
+registry change, an ingester version bump and a controlled replacement. Until
+then, subtract one hour from HLY01 keys before joining them with the GeoMet
+dataset or HLY03. Neither source is declared authoritative, and each analysis
+chooses between them. `eccc_dly04_observations` is
 declared but has never been ingested, so reading it raises `LookupError`;
 `doctor` reports that state rather than leaving it to be discovered at read
 time. Remaining source entries are `provisional`; ingestion is blocked until

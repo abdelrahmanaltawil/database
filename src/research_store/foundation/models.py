@@ -131,10 +131,13 @@ class SentinelRule:
     evidence: str = ""
 
     def __post_init__(self) -> None:
-        if self.meaning not in {"missing", "measured_zero"}:
+        # "not_applicable": the publisher reports a state in which the quantity
+        # is undefined (a calm wind has no direction). It is stored as null,
+        # like a missing value, but it is not a gap in the record.
+        if self.meaning not in {"missing", "not_applicable", "measured_zero"}:
             raise ValueError(f"Unsupported sentinel meaning: {self.meaning}")
-        if self.meaning == "missing" and self.replacement is not None:
-            raise ValueError("A missing sentinel must map to null")
+        if self.meaning in {"missing", "not_applicable"} and self.replacement is not None:
+            raise ValueError(f"A {self.meaning} sentinel must map to null")
         if self.meaning == "measured_zero" and self.replacement != 0.0:
             raise ValueError("A measured-zero sentinel must map to 0.0")
 

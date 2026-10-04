@@ -145,10 +145,21 @@ class StoreWriter:
         source_uri: str | None = None,
         publisher_vintage: str | None = None,
         fetched_at: str | None = None,
+        original_name: str | None = None,
     ) -> SourceAsset:
+        """Archive one source's bytes and record the name it arrived under.
+
+        `original_name` defaults to the file's own name. A producer that reads
+        a member back out of ``raw/`` (a replay) passes the publisher's name so
+        the alias is not a content digest.
+        """
+
         source = source.expanduser().resolve(strict=True)
         if not source.is_file():
             raise ValueError(f"Source is not a regular file: {source}")
+        name = original_name if original_name is not None else source.name
+        if not name.strip() or "/" in name:
+            raise ValueError(f"Invalid original source name: {name!r}")
 
         object_root = self.paths.raw / "objects" / "sha256"
         object_root.mkdir(parents=True, exist_ok=True)
@@ -164,7 +175,7 @@ class StoreWriter:
                 target.flush()
                 os.fsync(target.fileno())
             checksum = digest.hexdigest()
-            final = object_root / checksum[:2] / checksum[2:]
+            final = self.paths.raw_object(checksum)
             final.parent.mkdir(parents=True, exist_ok=True)
             if final.exists():
                 Path(temporary_name).unlink()
@@ -183,7 +194,7 @@ class StoreWriter:
             sha256=checksum,
             size_bytes=size,
             raw_path=final,
-            original_name=source.name,
+            original_name=name,
             source_uri=source_uri,
             publisher_vintage=publisher_vintage,
             fetched_at=fetched_at,
@@ -192,7 +203,7 @@ class StoreWriter:
             "source_id": source_id,
             "sha256": checksum,
             "size_bytes": size,
-            "original_name": source.name,
+            "original_name": name,
             "source_uri": source_uri,
             "publisher_vintage": publisher_vintage,
             "fetched_at": fetched_at,

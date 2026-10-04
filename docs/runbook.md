@@ -210,6 +210,7 @@ The configured ECCC source elements currently map as follows:
 | `eccc_hly01_observations` | 262-280 | Hourly/15-minute precipitation, gauge weight, 2 m wind and snow depth |
 | `eccc_hly03_observations` | 123 | `precipitation_amount_1h` in mm |
 | `eccc_dly04_observations` | 001-003, 010-012 | Daily maximum, minimum and mean air temperature in degC; rainfall and total precipitation in mm; snowfall in cm |
+| `eccc_climate_hourly_observations` | GeoMet `climate-hourly` fields (precipitation is element 262) | Air and dew point temperature in degC, relative humidity in %, `precipitation_amount_1h` in mm, wind direction in degrees true (publisher tens of degrees x 10; calm is null), wind speed in km/h, visibility in km, station pressure in kPa, humidex and wind chill (unitless indices), English present-weather text |
 
 Element 013, snow on the ground, is deliberately unregistered. The archive
 documents no observation time for it, so it cannot be given an interval without
@@ -262,6 +263,135 @@ ORDER BY r.dataset_id, a.original_name, r.record_locator"
 
 The source hash and locator point back to the immutable object recorded in
 `catalog.main.source_files`; no malformed bytes are silently discarded.
+
+## 6b. Fetch and ingest ECCC hourly climate observations from MSC GeoMet
+
+`eccc_climate_hourly_observations` is downloaded rather than delivered, so it
+takes two commands. `fetch` is the only step that uses the network; `ingest` is
+offline and replayable.
+
+```bash
+research-store fetch eccc_climate_hourly_observations \
+  --station 6153301 \
+  --start 2000-01-01 --end 2026-09-01
+```
+
+`--station` repeats for several Climate IDs, and `--start`/`--end` pairs repeat
+for several disjoint periods. Days are local standard time; `--end` is
+exclusive, so end at the first day of a month to keep the last window a
+complete month. Each station and LST calendar year is one window: the command
+asks for the window's record count (`resulttype=hits`), then for its CSV pages
+(`limit=10000`, `offset` paging, sorted by `LOCAL_DATE`). The API's `datetime`
+filter is inclusive, so a window's request ends one second before the next
+window starts; that keeps the 23:30 records of UTC-3:30 (Newfoundland)
+stations, whose `LOCAL_DATE` falls on the half hour. Requests are strictly
+sequential and at least `--delay-seconds` apart (default and minimum 1 s), a
+busy server (429 or 5xx) is retried at most three times with 5/10/20 s
+back-off honouring `Retry-After`, and the User-Agent names this store. The
+example above is 27 windows, 54 requests. A station with no records in the
+range stops the fetch: the collection serves only a subset of ECCC stations.
+
+The command prints the selection manifest it wrote, for example
+`ResearchDataStore/downloads/eccc_climate_hourly_observations/20260925T063700Z_<digest>.tsv`,
+and a JSON summary whose `open_windows` counts windows that ended less than
+the registry's `settle_days` (7) before they were retrieved and can still gain
+hours. Responses are cached by request URL: running the same fetch again makes
+no requests for settled windows, and asks again for open ones. Ingest the
+printed manifest:
+
+```bash
+research-store ingest eccc_climate_hourly_observations \
+  ResearchDataStore/downloads/eccc_climate_hourly_observations/<manifest>.tsv \
+  --publisher-vintage 'MSC GeoMet climate-hourly (pygeoapi 0.20.0), retrieved 2026-09-25'
+```
+
+The source URI defaults to the collection URL and the fetch time to the newest
+retrieval in the manifest; each response is archived with its own request URL
+and retrieval time. Every ingest publishes a replacement snapshot. It is
+refused when it would hide hours readers can see, the `LOCAL_DATE` range each
+window of the published snapshot held (so starting at a station's first
+record, or ending after its last, is not a shrink); pass
+`--allow-selection-shrink` only when publishing a smaller selection on purpose.
+The run records how the check was applied as `selection_guard`.
+
+To refresh, because ECCC revises live values:
+
+```bash
+research-store fetch eccc_climate_hourly_observations \
+  --station 6153301 --start 2000-01-01 --end 2026-10-01 --refresh
+```
+
+`--refresh` requests every response again. A response whose bytes (for a
+count, whose `numberMatched`) are unchanged keeps its original file and
+retrieval time, so an unchanged refresh prints the same manifest and its
+ingest is a no-op; the exception is an open window that has settled since,
+which is recorded again with the retrieval that makes it final. Without
+`--refresh`, only windows that are new, not cached or still open are
+downloaded. Manifest names begin with their newest retrieval time, so
+`reingest` replays them in the order they were fetched.
+
+`downloads/eccc_climate_hourly_observations/` is only a cache. Once ingested,
+every byte is in `raw/`, and `research-store reingest
+eccc_climate_hourly_observations` rebuilds the dataset without it. Other
+directories under `downloads/` hold delivered publisher downloads that
+ingestion reports cite; keep them. `reingest` replays the archived manifests
+oldest first. One that was published before is not measured against the newer
+snapshot it precedes, so the newest published selection ends up live; one that
+was refused is refused again, and `reingest` then exits 1 after reporting it.
+A rebuild keeps the rebuilt snapshot's original commit time, so it never
+changes which snapshot is live.
+
+Reconcile the live snapshot window by window. The count, the physical rows and
+accepted plus quarantined rows must agree:
+
+```bash
+research-store sql "
+WITH latest AS (
+  SELECT run_id FROM catalog.main.snapshots
+  WHERE dataset_id = 'eccc_climate_hourly_observations' AND state = 'committed'
+  ORDER BY committed_at DESC LIMIT 1
+), counts AS (
+  SELECT json_extract_string(i.details_json, '$.climate_id') AS climate_id,
+         json_extract_string(i.details_json, '$.window_start_lst') AS window_start,
+         CAST(json_extract(i.details_json, '$.number_matched') AS BIGINT) AS number_matched,
+         json_extract_string(i.details_json, '$.first_local_date') AS first_local_date,
+         json_extract_string(i.details_json, '$.last_local_date') AS last_local_date,
+         json_extract_string(i.details_json, '$.settled_at_retrieval') AS settled
+  FROM catalog.main.ingestion_inputs AS i JOIN latest USING (run_id)
+  WHERE i.input_role = 'completeness_evidence'
+), pages AS (
+  SELECT json_extract_string(i.details_json, '$.climate_id') AS climate_id,
+         json_extract_string(i.details_json, '$.window_start_lst') AS window_start,
+         CAST(sum(CAST(json_extract(i.details_json, '$.rows') AS BIGINT)) AS BIGINT) AS physical_rows,
+         CAST(sum(CAST(json_extract(i.details_json, '$.rows_published') AS BIGINT)) AS BIGINT) AS published,
+         CAST(sum(CAST(json_extract(i.details_json, '$.rows_quarantined') AS BIGINT)) AS BIGINT) AS quarantined
+  FROM catalog.main.ingestion_inputs AS i JOIN latest USING (run_id)
+  WHERE i.input_role = 'observation_source'
+  GROUP BY 1, 2
+)
+SELECT c.climate_id, c.window_start, c.number_matched,
+       coalesce(p.physical_rows, 0) AS physical_rows,
+       coalesce(p.published, 0) AS published,
+       coalesce(p.quarantined, 0) AS quarantined,
+       c.first_local_date, c.last_local_date, c.settled
+FROM counts AS c LEFT JOIN pages AS p USING (climate_id, window_start)
+ORDER BY 1, 2"
+```
+
+Quarantined records carry `missing_station_timezone`,
+`standard_timezone_transition` or `publisher_utc_mismatch` in
+`ingestion_rejections`, with the response's source ID, a `line:N` locator and
+the publisher and derived UTC times.
+
+Each row is the hour ending at `LOCAL_DATE`: `time_end` is the publisher's
+`UTC_DATE`, `precipitation_amount_1h` is the total over the row, and the other
+variables are observed at its end. HLY01 files the same element-262 totals one
+hour later (a documented HLY01 defect awaiting a controlled replacement), so
+subtract one hour from HLY01 keys before comparing the two. The publisher's
+calm direction `0` is stored as a null `wind_direction`; a null with a blank
+flag is a calm report, a missing one carries `M`, and a `wind_speed` of 0 is a
+measured calm. Cite the data as "Data Source: Environment and Climate Change
+Canada".
 
 ## 7. Close a production ingestion
 

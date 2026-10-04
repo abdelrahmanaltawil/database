@@ -15,6 +15,7 @@ from research_store.foundation.paths import StorePaths
 from research_store.foundation.catalog import Catalog
 from research_store.foundation.pipeline import ParsedChunk, RejectedRecord
 from research_store.foundation.registry import DEFAULT_REGISTRY
+from research_store.foundation.station_time import timezone_overrides
 from research_store.foundation.writer import _HELD_LOCKS
 from research_store.ingestion import (
     fixed_width_daily,
@@ -554,7 +555,7 @@ def test_eccc_timezone_override_fills_only_an_absent_station(
     tmp_path: Path,
 ) -> None:
     spec = DEFAULT_REGISTRY.get("eccc_hly01_observations")
-    overrides = fixed_width_hourly._timezone_overrides(spec)
+    overrides = timezone_overrides(spec)
     assert {
         "1102259": "America/Vancouver",
         "6112335": "America/Toronto",

@@ -10,6 +10,10 @@ from research_store.foundation.conventions import (
     valid_calendar_day,
 )
 from research_store.foundation.models import SentinelRule
+from research_store.foundation.station_time import (
+    StandardTimeTransitionError,
+    local_standard_interval_to_utc,
+)
 
 
 def test_sentinel_meaning_changes_at_era_boundary() -> None:
@@ -63,3 +67,38 @@ def test_dst_ambiguity_is_not_guessed() -> None:
     values = pd.Series(["2024-11-03 01:30:00"])
     with pytest.raises(Exception, match="Cannot infer dst time"):
         utc_timestamps(values, source_timezone="America/Toronto")
+
+
+def _slot(local: str, timezone_name: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = pd.Timestamp(local)
+    return local_standard_interval_to_utc(
+        start, start + pd.Timedelta(hours=1), timezone_name, {}
+    )
+
+
+def test_local_standard_time_ignores_daylight_saving() -> None:
+    assert _slot("2018-07-01 00:00", "America/Toronto") == (
+        pd.Timestamp("2018-07-01T05:00:00Z"),
+        pd.Timestamp("2018-07-01T06:00:00Z"),
+    )
+    assert _slot("2021-01-01 00:00", "America/Toronto")[0] == pd.Timestamp(
+        "2021-01-01T05:00:00Z"
+    )
+
+
+def test_an_hour_spanning_a_standard_offset_change_is_not_placed() -> None:
+    # Yukon moved from UTC-8 to permanent UTC-7 at 2020-11-01 00:00 local time.
+    assert _slot("2020-10-31 22:00", "America/Dawson")[0] == pd.Timestamp(
+        "2020-11-01T06:00:00Z"
+    )
+    with pytest.raises(StandardTimeTransitionError):
+        _slot("2020-10-31 23:00", "America/Dawson")
+    assert _slot("2020-11-01 00:00", "America/Dawson")[0] == pd.Timestamp(
+        "2020-11-01T07:00:00Z"
+    )
+
+
+def test_inuvik_2004_daylight_history_still_gives_one_hour_slots() -> None:
+    start, end = _slot("2004-10-31 01:00", "America/Inuvik")
+    assert end - start == pd.Timedelta(hours=1)
+    assert start == pd.Timestamp("2004-10-31T08:00:00Z")

@@ -34,8 +34,18 @@ fragments require a controlled replacement before publishing new data.
 
 Ingest the original source file, not an edited copy. The store must retain its
 SHA-256 object, alias, source URI when available, publisher vintage and fetch
-time. Never commit raw or restricted data, source hashes that are sensitive, or
-absolute workstation paths to the Git repository.
+time.
+
+For a publisher API, each response body is a source in its own right: its
+request URL is its source URI and its retrieval time is its fetch time. The
+selection manifest that lists the responses is the run's source, and the
+responses are recorded as ingestion inputs with their roles. Acquisition
+(`research-store fetch`) and ingestion are separate steps, so an ingest never
+depends on the network and can be replayed from `raw/`.
+
+Never commit raw or restricted data, source hashes that are sensitive, or
+absolute workstation paths to the Git repository. A test fixture that must
+keep a publisher's byte layout carries synthetic values.
 
 ## 3. Execute and inspect
 
@@ -59,6 +69,11 @@ malformed physical line whose valid embedded record was recovered. Also verify:
 - every rejected physical record has one documented reason;
 - unexpected flags and sentinels are counted and preserved; and
 - the latest committed snapshot contains the intended cumulative manifest.
+
+For a paged API, reconcile per requested window: the published count
+(`numberMatched` of the `resulttype=hits` response) equals the physical rows of
+the window's pages, which equals accepted plus quarantined rows. The GeoMet
+climate-hourly ingester refuses a window whose pages do not hold its count.
 
 If exact reconciliation is impossible, status is `incomplete` and the mismatch
 is a blocker, not a rounding error.

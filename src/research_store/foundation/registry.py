@@ -227,6 +227,53 @@ _ECCC_HOURLY_TIMEZONE_OVERRIDES: dict[str, dict[str, str]] = {
 }
 
 
+# The fixed header of an MSC GeoMet climate-hourly `f=csv` response, in the
+# order pygeoapi 0.20.0 serves it. A change in names or order stops ingestion.
+_GEOMET_CLIMATE_HOURLY_COLUMNS: tuple[str, ...] = (
+    "x",
+    "y",
+    "STATION_NAME",
+    "CLIMATE_IDENTIFIER",
+    "ID",
+    "LOCAL_DATE",
+    "PROVINCE_CODE",
+    "LOCAL_YEAR",
+    "LOCAL_MONTH",
+    "LOCAL_DAY",
+    "LOCAL_HOUR",
+    "UTC_DATE",
+    "UTC_YEAR",
+    "UTC_MONTH",
+    "UTC_DAY",
+    "TEMP",
+    "TEMP_FLAG",
+    "DEW_POINT_TEMP",
+    "DEW_POINT_TEMP_FLAG",
+    "HUMIDEX",
+    "HUMIDEX_FLAG",
+    "PRECIP_AMOUNT",
+    "PRECIP_AMOUNT_FLAG",
+    "RELATIVE_HUMIDITY",
+    "RELATIVE_HUMIDITY_FLAG",
+    "STATION_PRESSURE",
+    "STATION_PRESSURE_FLAG",
+    "VISIBILITY",
+    "VISIBILITY_FLAG",
+    "WEATHER_ENG_DESC",
+    "WEATHER_FRE_DESC",
+    "WINDCHILL",
+    "WINDCHILL_FLAG",
+    "WIND_DIRECTION",
+    "WIND_DIRECTION_FLAG",
+    "WIND_SPEED",
+    "WIND_SPEED_FLAG",
+    "STN_ID",
+    "LONGITUDE_DECIMAL_DEGREES",
+    "LATITUDE_DECIMAL_DEGREES",
+    "FLAG",
+)
+
+
 BASE_REGISTRY = Registry(
     [
         DatasetSpec(
@@ -429,6 +476,21 @@ BASE_REGISTRY = Registry(
                     "scientific-quality assessment for HLY01 values.",
                     "The archive-level R/Q status described in Note 33 cannot "
                     "be reconstructed per value from these files.",
+                    "Stored one hour late (evidence of 2026-09-25, pending a "
+                    "controlled replacement): source slot H holds the hour ENDING "
+                    "at H LST, but the element declarations place it at [H, H+1). "
+                    "At HAMILTON RBG CS (6153301) element 262 is non-zero one "
+                    "stored hour after 341 of 388 onsets of "
+                    "eccc_hly03_observations element 123, whose slots ECCC "
+                    "documents as hours ending 01-24, and at the same stored "
+                    "hour after 13; and it equals, slot H for LOCAL_DATE H, the "
+                    "MSC GeoMet climate-hourly total that the relative-humidity "
+                    "and temperature readings place in the hour ending at H. "
+                    "Elements 263-280 share the slot and need the same review. "
+                    "Until a registry change, an ingester version bump and a "
+                    "supersede-and-re-ingest correct it, subtract one hour from "
+                    "HLY01 keys before joining them with eccc_hly03_observations "
+                    "or eccc_climate_hourly_observations.",
                 ),
                 notes=(
                     "Elements 275-278 (snow depth) are scaled by 0.01, not 1.0. "
@@ -828,6 +890,628 @@ BASE_REGISTRY = Registry(
                     "012": {"variable": "precipitation_amount", "scale": 0.1},
                 },
                 "encoding": "ascii",
+            },
+        ),
+        DatasetSpec(
+            dataset_id="eccc_climate_hourly_observations",
+            description=(
+                "ECCC hourly climate observations (temperature, humidity, "
+                "precipitation, wind, visibility, pressure, humidex, wind chill, "
+                "weather) from the MSC GeoMet OGC API climate-hourly collection"
+            ),
+            kind=DatasetKind.EXTERNAL,
+            producer="geomet_climate_hourly",
+            storage_model=StorageModel.WIDE,
+            temporal_kind=TemporalKind.INTERVAL,
+            native_frequency="1 hour",
+            source_timezone="station-specific IANA local standard time",
+            timestamp_semantics=(
+                "one row per Climate ID and LOCAL_DATE H, the observation time in "
+                "local standard time (no daylight saving); the row is keyed by the "
+                "hour ending then, [H-1h, H) LST, converted to UTC with the "
+                "station's historical standard offset, so time_end is the "
+                "publisher's UTC_DATE. precipitation_amount_1h is the total over "
+                "that hour; every other variable is observed at its end, H (wind "
+                "as the mean of the 1, 2 or 10 minutes ending then). H falls on "
+                "the hour, or on the half hour at UTC-3:30 (Newfoundland) "
+                "stations. ingest_options.variable_timing declares each placement"
+            ),
+            snapshot_mode="replace",
+            variables=(
+                VariableSpec(
+                    "air_temperature",
+                    "air temperature",
+                    "degC",
+                    quality_field="air_temperature_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=-50.0,
+                        maximum=40.0,
+                        evidence=(
+                            "No Canadian station has a monthly mean colder than "
+                            "about -38 degC (Eureka, February) or warmer than about "
+                            "25 degC, so the median of any station-month selection "
+                            "lies inside [-50, 40]; HAMILTON RBG CS reads 21.1 degC "
+                            "in July 2018 and -0.7 degC in January 2021. The band "
+                            "refuses kelvin (about 250-300) and a tenfold error "
+                            "wherever the true median is further than about 4.4 "
+                            "degC from zero; a tenths error in mild weather passes."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "dew_point_temperature",
+                    "dew point temperature",
+                    "degC",
+                    quality_field="dew_point_temperature_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=-60.0,
+                        maximum=35.0,
+                        evidence=(
+                            "The dew point cannot exceed the air temperature, and "
+                            "Canadian record dew points are below 35 degC, so a "
+                            "median outside [-60, 35] degC is a unit or scale "
+                            "error. It refuses kelvin; like air temperature it "
+                            "cannot see a tenths error near 0 degC."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "relative_humidity",
+                    "relative humidity",
+                    "%",
+                    quality_field="relative_humidity_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=10.0,
+                        maximum=100.0,
+                        evidence=(
+                            "Relative humidity is bounded by 100 percent and its "
+                            "hourly median is well above 10 percent at every "
+                            "Canadian station (HAMILTON RBG CS reads about 70-85 "
+                            "percent). A fraction (0-1) or a tenfold scale leaves "
+                            "the band."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "precipitation_amount_1h",
+                    "precipitation amount",
+                    "mm",
+                    quality_field="precipitation_amount_1h_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=0.02,
+                        maximum=20.0,
+                        ignore_zeros=True,
+                        evidence=(
+                            "The same tripwire as eccc_hly01_observations element "
+                            "262, which this field is: hourly totals are zero in "
+                            "most slots, so only the median of the values that "
+                            "recorded something moves with the scale. It reads "
+                            "1.05 mm (July 2018) and 0.4 mm (January 2021) at "
+                            "HAMILTON RBG CS; a hundredfold error would read 40-105."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "wind_direction",
+                    (
+                        "wind direction, degrees true from which the wind blows "
+                        "(360 is north; null when the publisher reports calm)"
+                    ),
+                    "degree_true",
+                    quality_field="wind_direction_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.99,
+                        minimum=0.0,
+                        maximum=360.0,
+                        evidence=(
+                            "A compass bearing cannot leave [0, 360] degrees. The "
+                            "publisher's tens-of-degrees encoding is checked value "
+                            "by value instead (source_integer_ranges: integers "
+                            "0-36), which, unlike a quantile, does not depend on "
+                            "how much data or which wind regime a selection holds."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "wind_speed",
+                    (
+                        "wind speed, usually at 10 m, averaged over the 1, 2 or "
+                        "10 minutes ending at the observation time"
+                    ),
+                    "km/h",
+                    quality_field="wind_speed_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=0.5,
+                        maximum=40.0,
+                        ignore_zeros=True,
+                        evidence=(
+                            "Calm hours are reported as 0 (33 percent of July 2018 "
+                            "and 22 percent of January 2021 at HAMILTON RBG CS), so "
+                            "the band measures non-calm hours, whose median is a "
+                            "light breeze: 6-7 km/h there, and about 8-10 km/h "
+                            "across the HLY archive. m/s or knots stay inside; a "
+                            "tenfold scale does not."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "visibility",
+                    "horizontal visibility",
+                    "km",
+                    quality_field="visibility_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=0.5,
+                        maximum=100.0,
+                        evidence=(
+                            "Staffed stations report visibility in kilometres and "
+                            "their hourly median is tens of kilometres; metres "
+                            "would read thousands. Automatic stations such as "
+                            "HAMILTON RBG CS report none, and an all-null "
+                            "publication is not measured."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "station_pressure",
+                    "air pressure at station elevation",
+                    "kPa",
+                    quality_field="station_pressure_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=50.0,
+                        maximum=110.0,
+                        evidence=(
+                            "Station pressure is about 101 kPa at sea level and "
+                            "about 76 kPa at the highest Canadian stations (about "
+                            "2300 m); HAMILTON RBG CS reads 100.4-100.6 kPa. The "
+                            "band refuses hPa (about 1000) and Pa."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "humidex",
+                    "humidex index",
+                    "1",
+                    quality_field="humidex_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=20.0,
+                        maximum=60.0,
+                        evidence=(
+                            "ECCC displays humidex only when the air temperature is "
+                            "at least 20 degC and humidex exceeds it by at least 1, "
+                            "so every published value is at least 21; the Canadian "
+                            "record is about 53. The July 2018 median at HAMILTON "
+                            "RBG CS is 29."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "wind_chill",
+                    "wind chill index",
+                    "1",
+                    quality_field="wind_chill_quality",
+                    plausible_band=PlausibleBand(
+                        quantile=0.5,
+                        minimum=-70.0,
+                        maximum=5.0,
+                        evidence=(
+                            "Wind chill is computed only when the air temperature "
+                            "is at or below 0 degC, so its median is negative; the "
+                            "January 2021 median at HAMILTON RBG CS is -6. The band "
+                            "catches a sign flip and a hundredfold scale."
+                        ),
+                    ),
+                ),
+                VariableSpec(
+                    "weather_description",
+                    "present weather description (English)",
+                    None,
+                    dtype="string",
+                ),
+            ),
+            annotations=(
+                AnnotationSpec(
+                    "source_station_id",
+                    "publisher STN_ID internal station index retained verbatim",
+                ),
+                AnnotationSpec(
+                    "record_flag",
+                    (
+                        "publisher record-level FLAG field retained verbatim; its "
+                        "codes are not documented by the collection"
+                    ),
+                ),
+            ),
+            # Each marker applies only to the value fields that
+            # ingest_options.sentinel_variables names for it.
+            sentinel_rules=(
+                SentinelRule(
+                    marker="",
+                    meaning="missing",
+                    replacement=None,
+                    evidence=(
+                        "GeoMet f=csv writes a null property as an empty field; the "
+                        "same records in f=json carry null (HAMILTON RBG CS "
+                        "2024-07-01, retrieved 2026-09-25); the ECCC bulk hourly "
+                        "CSV leaves these values blank. Applied to every variable "
+                        "value field; flags and annotations keep a blank verbatim."
+                    ),
+                ),
+                SentinelRule(
+                    marker="NA",
+                    meaning="missing",
+                    replacement=None,
+                    evidence=(
+                        "WEATHER_ENG_DESC is 'NA' with WEATHER_FRE_DESC 'ND' (non "
+                        "disponible) in every hour of 2018-07 and 2021-01 at "
+                        "HAMILTON RBG CS, a station reporting no present weather; "
+                        "the bulk hourly CSV writes 'NA' or blank for the same "
+                        "hours. Scoped to weather_description only: nothing shows "
+                        "'NA' in a numeric field, so a numeric 'NA' stops "
+                        "ingestion as not a number instead of becoming null."
+                    ),
+                ),
+                SentinelRule(
+                    marker="0",
+                    meaning="not_applicable",
+                    replacement=None,
+                    evidence=(
+                        "ECCC Climate Data Online Glossary, Wind Direction: tens "
+                        "of degrees, 36 is north and zero denotes a calm wind. A "
+                        "calm wind has no direction, so the store keeps none "
+                        "rather than a bearing of 0 degrees that circular "
+                        "statistics would read as north; the ECCC bulk hourly CSV "
+                        "likewise leaves direction blank in calm hours. Scoped to "
+                        "wind_direction only; a wind speed of 0 is a measured zero."
+                    ),
+                ),
+            ),
+            documentation=DocumentationSpec(
+                source_format=(
+                    "MSC GeoMet OGC API climate-hourly f=csv (pygeoapi 0.20.0): "
+                    "UTF-8 CSV with CRLF line endings, the fixed 41-column header, "
+                    "one row per Climate ID and LOCAL_DATE, empty field = null. One "
+                    "request per Climate ID and LST calendar-year window, whose "
+                    "inclusive datetime filter ends one second before the next "
+                    "window (sortby=LOCAL_DATE, limit=10000, offset paging); the "
+                    "window's record count is evidenced by a resulttype=hits "
+                    "GeoJSON response. A tab-separated selection manifest written "
+                    "by `research-store fetch` names every response with its "
+                    "request URL, retrieval time and SHA-256."
+                ),
+                references=(
+                    "Environment and Climate Change Canada, MSC GeoMet OGC API "
+                    "collection climate-hourly ('Climate - Hourly Observations'), "
+                    "collection metadata and queryables, "
+                    "https://api.weather.gc.ca/collections/climate-hourly, "
+                    "retrieved 2026-09-25 (pygeoapi 0.20.0).",
+                    "Environment and Climate Change Canada, MSC Open Data: "
+                    "GeoMet-OGC-API technical documentation, "
+                    "https://eccc-msc.github.io/open-data/msc-geomet/ogc_api_en/, "
+                    "accessed 2026-09-25: f=csv output, 10 000 features per "
+                    "query, offset paging and resulttype=hits numberMatched.",
+                    "Environment and Climate Change Canada, Climate Data Online "
+                    "Glossary, https://climate.weather.gc.ca/glossary_e.html, "
+                    "modified 2026-08-10: Local Standard Time; Total Hourly "
+                    "Precipitation (element 262, minutes 00 through 60); R status "
+                    "before and Q status from 2013-12-10; wind direction, calm, "
+                    "wind speed, humidex, wind chill, station pressure.",
+                    "Environment and Climate Change Canada, Technical "
+                    "documentation: Historical Hourly Climate Station Data, "
+                    "canada.ca, modified 2023-05-01: wind direction in tens of "
+                    "degrees true with 0 denoting calm; wind speed at 10 m "
+                    "averaged over the 1, 2 or 10 minutes ending at the "
+                    "observation; humidex displayed only at 20 degC or above and "
+                    "at least 1 degree above the air temperature; wind chill at "
+                    "or below 0 degC.",
+                    "Environment and Climate Change Canada Data Services End-use "
+                    "Licence, Version 2.1.1, August 2026, "
+                    "https://eccc-msc.github.io/open-data/licence/readme_en/: "
+                    "attribution 'Data Source: Environment and Climate Change "
+                    "Canada'; information licensed 'as is'.",
+                    "Environment and Climate Change Canada, Climate Data Online "
+                    "FAQ, https://climate.weather.gc.ca/FAQ_e.html: flag 'M' "
+                    "denotes missing data.",
+                ),
+                quality_control=(
+                    "Values are published as served by the live National Climate "
+                    "Archive. Only basic automatic assessment at the ingest stage "
+                    "(status 'Q' from 2013-12-10, 'R' raw before) is documented; "
+                    "no per-record status is delivered. Source flags are kept "
+                    "verbatim and nothing is filtered at ingestion. ECCC can revise "
+                    "values, so each ingest is a replacement snapshot and earlier "
+                    "snapshots stay readable by ID."
+                ),
+                quality_flags={
+                    "blank": "No source flag.",
+                    "M": "Missing; the value is not available and cannot be retrieved.",
+                },
+                limitations=(
+                    "The collection serves only a subset of ECCC climate stations "
+                    "(cities of 10 000+, Regional Basic Climatological Network "
+                    "stations and stations with 30+ years of data); a Climate ID "
+                    "it does not serve returns no records and the fetch stops.",
+                    "Station figures in these limitations are for HAMILTON RBG CS "
+                    "(6153301), 2000-08-17 to 2026-08-31 LST as served on "
+                    "2026-09-25, compared with the ECCC bulk hourly CSVs for "
+                    "2013-2025 downloaded in early 2025; "
+                    "docs/ingestion-reports/2026-09-25-eccc-climate-hourly.md "
+                    "derives them.",
+                    "Calm wind: the publisher reports direction 0 and the store "
+                    "keeps no direction (null). A null direction with a blank "
+                    "flag and a non-null speed is a calm report (48,299 hours at "
+                    "HAMILTON RBG CS); a missing direction carries flag 'M'. In "
+                    "131 hours, all in 2018, the publisher reports calm at a "
+                    "speed of 1 km/h. In 650 hours the bulk CSV has 0 km/h and no "
+                    "direction where the API has 1 km/h (267) or 2 km/h (383): "
+                    "105 in 2013-01 and 545 in 2018-07 to 2018-11. The API gives "
+                    "a direction in 519 of them, and the other 131 are the "
+                    "calm-at-1-km/h hours. Wind statistics from this dataset and "
+                    "from the bulk CSVs therefore differ slightly.",
+                    "Values are live and revisable; a later ingest can differ from "
+                    "an earlier one for the same hour. Pin frame.attrs['snapshot_id'].",
+                    "July 2022, most likely revised by ECCC after the bulk-CSV "
+                    "download: between 2022-07-08 14:00 and 2022-07-20 15:00 LST "
+                    "the API reports 289 precipitation hours as null and flagged "
+                    "'M' where the bulk CSV and eccc_hly01_observations have "
+                    "values (9 wet, 32.8 mm in total), and reports calm (0 km/h) "
+                    "in 9 hours where the bulk CSV has 3 km/h and a direction.",
+                    "The API serves no record for 21 hours in which the bulk CSV "
+                    "has values: 2015-05-25 14:00 to 2015-05-26 09:00 and "
+                    "2022-04-22 19:00 LST. They are absent from the publisher's "
+                    "responses and from its numberMatched counts, so they are not "
+                    "ingestion losses; eccc_hly01_observations holds their "
+                    "precipitation.",
+                    "In 97 hours of 2024-10 wind speed is null and flagged 'M' "
+                    "but a direction is stored; the bulk CSV flags the speed 'M' "
+                    "too and leaves the direction blank with a blank flag.",
+                    "HAMILTON RBG CS has no records from 2017-10-30 11:00 to "
+                    "2018-01-10 11:00 LST. The gap is in the publisher's archive "
+                    "(the bulk CSVs are blank there too), not a fetch or "
+                    "ingestion loss.",
+                    "A blank flag does not prove a reported value. Precipitation "
+                    "is null with a blank flag in 32,856 hours, all before 2019, "
+                    "because the publisher flags missing precipitation 'M' only "
+                    "from 2019: 31,953 before the first gauge value at "
+                    "2004-04-19 13:00 LST, 18 from 2004-04-19 16:00 to "
+                    "2004-04-20 09:00 LST, and 885 in 2007-2016. Visibility is "
+                    "null with a blank flag from 2005. At 2009-03-31 20:00 LST "
+                    "only precipitation (0.0 mm) is reported, and at 2016-08-22 "
+                    "03:00 LST only temperature, dew point and relative "
+                    "humidity; the other values of those hours, wind speed, "
+                    "wind direction and station pressure included, are null "
+                    "with blank flags, so a null wind direction there is not "
+                    "calm. At 2020-06-10 23:00 LST air temperature is null with "
+                    "a blank flag while dew point, humidity, precipitation, wind "
+                    "and pressure are reported.",
+                    "Coverage at HAMILTON RBG CS: temperature, dew point and "
+                    "precipitation have long 'M' gaps in 2019 (4,308, 4,271 and "
+                    "3,193 values in 8,753 hours) and 2020 (5,519, 5,008 and "
+                    "5,559 values in 8,760 hours); station pressure starts in "
+                    "2013.",
+                    "A window retrieved less than api.settle_days after it ended "
+                    "(the current year, typically) can still gain hours; each "
+                    "window's settled_at_retrieval flag and last LOCAL_DATE are "
+                    "recorded with the run as completeness_evidence.",
+                    "Humidex and wind chill are absent outside their display "
+                    "conditions; a null there is not missing data.",
+                    "Automatic stations report no visibility or present weather.",
+                    "Anemometer height and averaging window vary by station and "
+                    "era and are not delivered per record.",
+                    "Hourly flag codes other than blank and 'M' are not documented "
+                    "by the collection; any such code is preserved and counted and "
+                    "must be documented here before it is interpreted.",
+                ),
+                notes=(
+                    "LOCAL_DATE H is the observation time and PRECIP_AMOUNT the "
+                    "total for the hour ending then. At 410 rain onsets in the "
+                    "2013-2025 ECCC bulk hourly CSV for HAMILTON RBG CS "
+                    "(identical to this collection where compared) relative "
+                    "humidity rises 10.3 points and temperature falls 1.5 degC "
+                    "between the readings at H-1 and H, and barely changes from "
+                    "H to H+1; eccc_hly03_observations element 123, whose slots "
+                    "ECCC documents as hours ending 01-24, shows the same "
+                    "signature; at its onsets the bulk-CSV total labelled with the "
+                    "same ending hour is non-zero in 125 of 128 and the one "
+                    "labelled an hour earlier in 4 of 126 (checked 2026-09-25).",
+                    "precipitation_amount_1h is ECCC element 262 and equals "
+                    "eccc_hly01_observations.precipitation_amount_1h value for "
+                    "value when LOCAL_DATE H is matched to HLY01 source slot H "
+                    "(HAMILTON RBG CS: 2,267 of 2,267 hours in 2013-04, 2018-07, "
+                    "2020-05 and 2021-01, -03 and -11, checked 2026-09-25; the "
+                    "ingestion report repeats it for the full record). HLY01 "
+                    "keys that slot one hour later, [H, H+1), which its own "
+                    "documentation records as a defect pending a controlled "
+                    "replacement, so until then this dataset's time_start equals "
+                    "HLY01's time_start minus one hour for the same total. "
+                    "Neither dataset is declared authoritative; each analysis "
+                    "chooses.",
+                    "LOCAL_DATE is converted to UTC through eccc_station_inventory "
+                    "and the evidence-backed Climate ID overrides shared with the "
+                    "HLY archive; the publisher's own UTC_DATE is cross-checked "
+                    "against the converted observation time (time_end) and a "
+                    "disagreeing record is quarantined.",
+                    "WIND_DIRECTION is multiplied by 10 to degrees true and a calm "
+                    "0 is stored as null. Every other raw direction must be an "
+                    "integer from 1 to 36; any other value stops ingestion, "
+                    "because it means the publisher's encoding changed.",
+                    "Not republished, because they are redundant or held in the "
+                    "station inventory: x, y, ID, STATION_NAME, PROVINCE_CODE, "
+                    "LATITUDE/LONGITUDE_DECIMAL_DEGREES, the LOCAL_* and UTC_* "
+                    "components, and WEATHER_FRE_DESC. ID and the LOCAL_* and "
+                    "UTC_* components must agree with LOCAL_DATE and UTC_DATE; x, "
+                    "y, STATION_NAME, PROVINCE_CODE, STN_ID and the decimal-degree "
+                    "coordinates must be constant over each response, with x and "
+                    "y equal to the coordinates; otherwise ingestion stops. The "
+                    "constant values are recorded per response in "
+                    "ingestion_inputs (page_constants). WEATHER_FRE_DESC is not "
+                    "checked. All of them remain in the archived raw bytes.",
+                    "Attribution required by the licence: 'Data Source: "
+                    "Environment and Climate Change Canada'.",
+                ),
+            ),
+            ingest_options={
+                "api": {
+                    "collection_url": (
+                        "https://api.weather.gc.ca/collections/climate-hourly"
+                    ),
+                    "items_url": (
+                        "https://api.weather.gc.ca/collections/climate-hourly/items"
+                    ),
+                    "format": "csv",
+                    "limit": 10000,
+                    "sortby": "LOCAL_DATE",
+                    "window": "local_calendar_year",
+                    # On 2026-09-25 the collection held HAMILTON RBG CS to
+                    # 2026-09-23 23:00, and ECCC can still fill gaps after
+                    # that. A response is final only once its window ended this
+                    # long before it was retrieved; until then `fetch` asks
+                    # again rather than reusing its cache.
+                    "settle_days": 7,
+                },
+                "encoding": "utf-8",
+                "source_columns": list(_GEOMET_CLIMATE_HOURLY_COLUMNS),
+                "entity_column": "CLIMATE_IDENTIFIER",
+                "local_time_column": "LOCAL_DATE",
+                "local_time_format": "%Y-%m-%d %H:%M:%S",
+                # LOCAL_DATE is the observation time, the END of the hour whose
+                # total PRECIP_AMOUNT reports; see the documentation notes.
+                "local_time_labels": "slot_end",
+                "local_component_columns": [
+                    "LOCAL_YEAR",
+                    "LOCAL_MONTH",
+                    "LOCAL_DAY",
+                    "LOCAL_HOUR",
+                ],
+                "publisher_utc_column": "UTC_DATE",
+                "publisher_utc_format": "%Y-%m-%dT%H:%M:%S",
+                "utc_component_columns": ["UTC_YEAR", "UTC_MONTH", "UTC_DAY"],
+                "record_id_column": "ID",
+                "record_id_format": "{entity}.{year}.{month}.{day}.{hour}",
+                # Station metadata repeated on every row: one value per response.
+                "page_constant_columns": [
+                    "x",
+                    "y",
+                    "STATION_NAME",
+                    "PROVINCE_CODE",
+                    "STN_ID",
+                    "LONGITUDE_DECIMAL_DEGREES",
+                    "LATITUDE_DECIMAL_DEGREES",
+                ],
+                "coordinate_columns": {
+                    "x": "LONGITUDE_DECIMAL_DEGREES",
+                    "y": "LATITUDE_DECIMAL_DEGREES",
+                },
+                "column_map": {
+                    "air_temperature": "TEMP",
+                    "air_temperature_quality": "TEMP_FLAG",
+                    "dew_point_temperature": "DEW_POINT_TEMP",
+                    "dew_point_temperature_quality": "DEW_POINT_TEMP_FLAG",
+                    "relative_humidity": "RELATIVE_HUMIDITY",
+                    "relative_humidity_quality": "RELATIVE_HUMIDITY_FLAG",
+                    "precipitation_amount_1h": "PRECIP_AMOUNT",
+                    "precipitation_amount_1h_quality": "PRECIP_AMOUNT_FLAG",
+                    "wind_direction": "WIND_DIRECTION",
+                    "wind_direction_quality": "WIND_DIRECTION_FLAG",
+                    "wind_speed": "WIND_SPEED",
+                    "wind_speed_quality": "WIND_SPEED_FLAG",
+                    "visibility": "VISIBILITY",
+                    "visibility_quality": "VISIBILITY_FLAG",
+                    "station_pressure": "STATION_PRESSURE",
+                    "station_pressure_quality": "STATION_PRESSURE_FLAG",
+                    "humidex": "HUMIDEX",
+                    "humidex_quality": "HUMIDEX_FLAG",
+                    "wind_chill": "WINDCHILL",
+                    "wind_chill_quality": "WINDCHILL_FLAG",
+                    "weather_description": "WEATHER_ENG_DESC",
+                },
+                "annotation_map": {
+                    "source_station_id": "STN_ID",
+                    "record_flag": "FLAG",
+                },
+                # Every numeric variable declares its publisher scale; the parser
+                # refuses one that is missing. Wind direction is delivered in tens
+                # of degrees.
+                "scales": {
+                    "air_temperature": 1.0,
+                    "dew_point_temperature": 1.0,
+                    "relative_humidity": 1.0,
+                    "precipitation_amount_1h": 1.0,
+                    "wind_direction": 10.0,
+                    "wind_speed": 1.0,
+                    "visibility": 1.0,
+                    "station_pressure": 1.0,
+                    "humidex": 1.0,
+                    "wind_chill": 1.0,
+                },
+                # The publisher's documented raw encoding, checked value by
+                # value before scaling: tens of degrees, 0 (calm) to 36 (north).
+                "source_integer_ranges": {"wind_direction": [0, 36]},
+                "sentinel_variables": {
+                    "": [
+                        "air_temperature",
+                        "dew_point_temperature",
+                        "relative_humidity",
+                        "precipitation_amount_1h",
+                        "wind_direction",
+                        "wind_speed",
+                        "visibility",
+                        "station_pressure",
+                        "humidex",
+                        "wind_chill",
+                        "weather_description",
+                    ],
+                    "NA": ["weather_description"],
+                    "0": ["wind_direction"],
+                },
+                # Where each variable sits in the row's one-hour slot
+                # [H-1h, H) LST: minute 60 is H, the observation time.
+                "variable_timing": {
+                    "air_temperature": {"end_minute": 60, "duration_minutes": 0},
+                    "dew_point_temperature": {"end_minute": 60, "duration_minutes": 0},
+                    "relative_humidity": {"end_minute": 60, "duration_minutes": 0},
+                    "precipitation_amount_1h": {
+                        "start_minute": 0,
+                        "duration_minutes": 60,
+                    },
+                    "wind_direction": {"end_minute": 60, "duration_minutes": 2},
+                    "wind_speed": {"end_minute": 60, "duration_minutes": [1, 2, 10]},
+                    "visibility": {"end_minute": 60, "duration_minutes": 0},
+                    "station_pressure": {"end_minute": 60, "duration_minutes": 0},
+                    "humidex": {"end_minute": 60, "duration_minutes": 0},
+                    "wind_chill": {"end_minute": 60, "duration_minutes": 0},
+                    "weather_description": {"end_minute": 60, "duration_minutes": 0},
+                },
+                "timezone_policy": "station_inventory",
+                "station_dataset_id": "eccc_station_inventory",
+                "timezone_overrides": dict(_ECCC_HOURLY_TIMEZONE_OVERRIDES),
+                "missing_timezone_policy": "quarantine_record",
+                "standard_time_transition_policy": "quarantine_record",
+                "publisher_utc_mismatch_policy": "quarantine_record",
+                "manifest_delimiter": "\t",
+                "manifest_columns": [
+                    "climate_id",
+                    "window_start_lst",
+                    "window_end_lst",
+                    "role",
+                    "page_offset",
+                    "filename",
+                    "size_bytes",
+                    "sha256",
+                    "request_url",
+                    "retrieved_at",
+                    "http_date",
+                    "content_type",
+                    "server",
+                    "number_matched",
+                ],
             },
         ),
         DatasetSpec(

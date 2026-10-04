@@ -824,9 +824,16 @@ class Catalog:
                 """,
                 [snapshot_id, snapshot_id, dataset_id, source_id, run_id],
             )
+            # A rebuild re-publishes a snapshot that was committed before. It
+            # keeps its original commit time and any supersession: readers take
+            # the newest committed_at as live, so a fresh time would silently
+            # make an older, rebuilt snapshot the live one.
             connection.execute(
                 """
-                UPDATE snapshots SET state = 'committed', committed_at = current_timestamp
+                UPDATE snapshots
+                SET state = CASE WHEN superseded_at IS NULL THEN 'committed'
+                                 ELSE 'superseded' END,
+                    committed_at = coalesce(committed_at, current_timestamp)
                 WHERE snapshot_id = ?
                 """,
                 [snapshot_id],
@@ -1112,6 +1119,58 @@ class Catalog:
             (str(self.paths.root / path), json.loads(partition_json))
             for path, partition_json in rows
         ]
+
+    def latest_snapshot_inputs(
+        self, dataset_id: str, input_role: str
+    ) -> tuple[str | None, list[tuple[str, str, dict[str, Any]]]]:
+        """Inputs of one role recorded by the run behind the live snapshot.
+
+        Returns the snapshot and its `(input_key, source_id, details)` rows, so
+        a replacement producer can compare what it is about to publish with
+        what readers currently see.
+        """
+
+        with self.open(read_only=True) as connection:
+            selected = connection.execute(
+                """
+                SELECT snapshot_id, run_id FROM snapshots
+                WHERE dataset_id = ? AND state = 'committed'
+                ORDER BY committed_at DESC LIMIT 1
+                """,
+                [dataset_id],
+            ).fetchone()
+            if selected is None:
+                return None, []
+            rows = connection.execute(
+                """
+                SELECT input_key, source_id, details_json FROM ingestion_inputs
+                WHERE run_id = ? AND input_role = ?
+                ORDER BY input_key
+                """,
+                [selected[1], input_role],
+            ).fetchall()
+        return selected[0], [
+            (input_key, source_id, json.loads(details_json))
+            for input_key, source_id, details_json in rows
+        ]
+
+    def source_was_published(self, dataset_id: str, source_id: str) -> bool:
+        """Whether any run of this dataset over this source ever committed.
+
+        A replay (`research-store reingest`) re-presents sources that were
+        accepted before, under whatever ingester version and declaration were
+        current then; a source that was refused never committed.
+        """
+
+        with self.open(read_only=True) as connection:
+            found = connection.execute(
+                """
+                SELECT count(*) FROM ingestion_runs
+                WHERE dataset_id = ? AND source_id = ? AND state = 'committed'
+                """,
+                [dataset_id, source_id],
+            ).fetchone()[0]
+        return bool(found)
 
     def absolute_raw_path_count(self) -> int:
         with self.open(read_only=True) as connection:

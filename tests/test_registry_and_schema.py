@@ -43,6 +43,7 @@ def _wide_table(entity_values, *, value_type=None, timezone="UTC") -> pa.Table:
 def test_every_required_source_has_one_registry_entry() -> None:
     ids = {spec.dataset_id for spec in DEFAULT_REGISTRY}
     assert {
+        "eccc_climate_hourly_observations",
         "eccc_dly04_observations",
         "eccc_hly01_observations",
         "eccc_hly03_observations",
@@ -199,6 +200,127 @@ def test_eccc_hourly_metadata_matches_publisher_documentation() -> None:
     assert set(hly03.documentation.quality_flags) == {"blank", "H", "I", "J", "M"}
     assert any("winter zero" in item for item in hly03.documentation.limitations)
     assert any("Technical Documentation" in item for item in hly03.documentation.references)
+
+
+def test_eccc_climate_hourly_declaration_matches_publisher_documentation() -> None:
+    spec = DEFAULT_REGISTRY.get("eccc_climate_hourly_observations")
+    hly01 = DEFAULT_REGISTRY.get("eccc_hly01_observations")
+    spec.require_ready()
+    assert spec.producer == "geomet_climate_hourly"
+    assert spec.storage_model is StorageModel.WIDE
+    assert spec.temporal_kind is TemporalKind.INTERVAL
+    assert spec.snapshot_mode == "replace"
+    assert spec.native_frequency == "1 hour"
+    assert spec.source_timezone == hly01.source_timezone
+
+    expected = {
+        "air_temperature": ("degC", "TEMP"),
+        "dew_point_temperature": ("degC", "DEW_POINT_TEMP"),
+        "relative_humidity": ("%", "RELATIVE_HUMIDITY"),
+        "precipitation_amount_1h": ("mm", "PRECIP_AMOUNT"),
+        "wind_direction": ("degree_true", "WIND_DIRECTION"),
+        "wind_speed": ("km/h", "WIND_SPEED"),
+        "visibility": ("km", "VISIBILITY"),
+        "station_pressure": ("kPa", "STATION_PRESSURE"),
+        "humidex": ("1", "HUMIDEX"),
+        "wind_chill": ("1", "WINDCHILL"),
+    }
+    options = spec.ingest_options
+    column_map = options["column_map"]
+    assert set(spec.variable_names) == {*expected, "weather_description"}
+    for name, (unit, column) in expected.items():
+        variable = spec.variable(name)
+        assert variable.unit == unit
+        assert variable.dtype == "float64"
+        assert variable.quality_field == f"{name}_quality"
+        assert variable.plausible_band is not None
+        assert column_map[name] == column
+        assert column_map[variable.quality_field] == f"{column}_FLAG"
+    text = spec.variable("weather_description")
+    assert (text.dtype, text.unit, text.quality_field) == ("string", None, None)
+    assert column_map["weather_description"] == "WEATHER_ENG_DESC"
+    # Only wind direction is rescaled: the publisher reports tens of degrees.
+    assert {name for name, scale in options["scales"].items() if scale != 1.0} == {
+        "wind_direction"
+    }
+    assert options["scales"]["wind_direction"] == 10.0
+    assert set(options["scales"]) == set(expected)
+    # The raw encoding is checked per value; scaled, its maximum is north.
+    low, high = options["source_integer_ranges"]["wind_direction"]
+    assert (low, high) == (0, 36)
+    assert high * options["scales"]["wind_direction"] == 360.0, "tens of degrees"
+    band = spec.variable("wind_direction").plausible_band
+    assert (band.minimum, band.maximum) == (0.0, 360.0)
+    # The same threshold as the HLY01 element this field reproduces.
+    ours = spec.variable("precipitation_amount_1h").plausible_band
+    theirs = hly01.variable("precipitation_amount_1h").plausible_band
+    assert (ours.quantile, ours.minimum, ours.maximum, ours.ignore_zeros) == (
+        theirs.quantile,
+        theirs.minimum,
+        theirs.maximum,
+        theirs.ignore_zeros,
+    )
+    # LOCAL_DATE labels the end of the hour: the total is the whole slot and
+    # every other variable sits at its end. HLY01 still declares slot H as
+    # [H, H+1) for element 262, one hour later, and documents that as a defect.
+    assert options["local_time_labels"] == "slot_end"
+    timing = options["variable_timing"]
+    assert set(timing) == set(spec.variable_names)
+    assert timing["precipitation_amount_1h"] == {"start_minute": 0, "duration_minutes": 60}
+    for name, placement in timing.items():
+        if name != "precipitation_amount_1h":
+            assert placement["end_minute"] == 60, name
+    assert hly01.ingest_options["elements"]["262"]["start_minute"] == 0
+    assert any("one hour late" in item for item in hly01.documentation.limitations)
+
+    meanings = {rule.marker: rule.meaning for rule in spec.sentinel_rules}
+    assert meanings == {"": "missing", "NA": "missing", "0": "not_applicable"}
+    assert all(rule.replacement is None for rule in spec.sentinel_rules)
+    scope = options["sentinel_variables"]
+    assert set(scope[""]) == set(spec.variable_names)
+    assert scope["NA"] == ["weather_description"]
+    assert scope["0"] == ["wind_direction"]
+    assert [item.name for item in spec.annotations] == [
+        "source_station_id",
+        "record_flag",
+    ]
+    assert options["annotation_map"] == {"source_station_id": "STN_ID", "record_flag": "FLAG"}
+    assert len(options["source_columns"]) == 41
+    assert len(set(options["source_columns"])) == 41
+    assert set(column_map.values()) <= set(options["source_columns"])
+    for key in (
+        "timezone_policy",
+        "station_dataset_id",
+        "timezone_overrides",
+        "missing_timezone_policy",
+        "standard_time_transition_policy",
+    ):
+        assert options[key] == hly01.ingest_options[key], key
+    assert options["publisher_utc_mismatch_policy"] == "quarantine_record"
+    assert options["api"]["limit"] == 10000
+    assert options["api"]["format"] == "csv"
+    assert options["api"]["settle_days"] >= 1
+    assert set(options["page_constant_columns"]) <= set(options["source_columns"])
+    assert options["coordinate_columns"] == {
+        "x": "LONGITUDE_DECIMAL_DEGREES",
+        "y": "LATITUDE_DECIMAL_DEGREES",
+    }
+    assert options["manifest_columns"][:4] == [
+        "climate_id",
+        "window_start_lst",
+        "window_end_lst",
+        "role",
+    ]
+
+    documentation = spec.documentation
+    assert documentation is not None
+    assert set(documentation.quality_flags) == {"blank", "M"}
+    assert "CRLF" in documentation.source_format
+    notes = " ".join(documentation.notes)
+    assert "Data Source: Environment and Climate Change Canada" in notes
+    assert "element 262" in notes and "calm 0 is stored as null" in notes
+    assert any("End-use Licence" in item for item in documentation.references)
+    assert any("calm" in item.lower() for item in documentation.limitations)
 
 
 def test_documentation_is_catalogued_but_does_not_change_ingestion_identity(

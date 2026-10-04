@@ -30,6 +30,18 @@ The ECCC fixed-width layouts, per-element units and timing, and station workbook
 are source-configured. Station coordinates are resolved to IANA timezones and
 the national archive's local-standard-time timestamps are converted to UTC
 without applying daylight-saving shifts.
+ECCC hourly climate observations (temperature, dew point, humidity,
+precipitation, wind, pressure, visibility, humidex, wind chill and present
+weather) come from the MSC GeoMet OGC API `climate-hourly` collection.
+`research-store fetch`, backed by the `acquisition` layer, is the only command
+that touches the network: it requests one station and one local-standard-time
+year at a time, politely and with a published record count, caches every
+response under `downloads/<dataset>/`, and writes a selection manifest.
+`research-store ingest` of that manifest is offline: it archives every response
+in `raw/`, reconciles each window's rows with its count, and publishes a
+replacement snapshot, because the publisher can revise live values. Each row is
+the hour ending at the publisher's observation time. Data Source: Environment
+and Climate Change Canada.
 Corrected hydrometric unit-value collections are streamed directly from their
 compressed publisher files. Optional station selection, such as a gross
 drainage-area ceiling, belongs to an ingestion run rather than the dataset name,

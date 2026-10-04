@@ -5,9 +5,11 @@ import json
 import sys
 import textwrap
 import time
+from datetime import date
 from pathlib import Path
 
 from research_store.access.api import connect, describe, load
+from research_store.acquisition import geomet_climate_hourly as geomet_acquisition
 from research_store.foundation.catalog import Catalog
 from research_store.foundation.maintenance import (
     collect_garbage,
@@ -26,6 +28,7 @@ from research_store.foundation.writer import StoreWriteLock
 from research_store.ingestion import (
     fixed_width_daily,
     fixed_width_hourly,
+    geomet_climate_hourly,
     hydrometric_sqlite,
     inventory_csv,
     inventory_sqlite,
@@ -37,6 +40,7 @@ from research_store.ingestion import (
 INGESTERS = {
     "fixed_width_daily": fixed_width_daily.ingest,
     "fixed_width_hourly": fixed_width_hourly.ingest,
+    "geomet_climate_hourly": geomet_climate_hourly.ingest,
     "hydrometric_sqlite": hydrometric_sqlite.ingest,
     "inventory_csv": inventory_csv.ingest,
     "inventory_sqlite": inventory_sqlite.ingest,
@@ -83,6 +87,13 @@ def _ingest(args: argparse.Namespace) -> int:
             "--station-metadata and --max-drainage-area-km2 apply only to "
             "corrected unit-value ingestion"
         )
+    if spec.producer == "geomet_climate_hourly":
+        extra["allow_selection_shrink"] = args.allow_selection_shrink
+    elif args.allow_selection_shrink:
+        raise ValueError(
+            "--allow-selection-shrink applies only to replacement collections "
+            "fetched from MSC GeoMet"
+        )
     snapshot = ingester(
         args.dataset,
         args.source,
@@ -94,6 +105,46 @@ def _ingest(args: argparse.Namespace) -> int:
         **extra,
     )
     print(snapshot)
+    return 0
+
+
+def _fetch(args: argparse.Namespace) -> int:
+    """Download a publisher selection into the store's download cache.
+
+    This writes only below ``downloads/`` (atomically, one file at a time) and
+    never touches the catalogue, so it takes no write lock. The manifest it
+    prints is what `research-store ingest` then reads.
+    """
+
+    spec = DEFAULT_REGISTRY.get(args.dataset)
+    # One acquisition module exists, so it is called directly; a second API
+    # source would add its own branch here, as `_ingest` does for options.
+    if spec.producer != "geomet_climate_hourly":
+        raise ValueError(
+            f"{args.dataset!r} is ingested from delivered files; `fetch` applies "
+            "only to datasets acquired from the MSC GeoMet API"
+        )
+    if len(args.start) != len(args.end):
+        raise ValueError("Give one --end for every --start")
+    ranges = [
+        (date.fromisoformat(start), date.fromisoformat(end))
+        for start, end in zip(args.start, args.end, strict=True)
+    ]
+    downloads = args.downloads
+    if downloads is None:
+        downloads = _paths(args).downloads / args.dataset
+    # Climate IDs and ranges are validated where the windows are built.
+    result = geomet_acquisition.fetch_collection(
+        args.dataset,
+        climate_ids=args.station,
+        ranges=ranges,
+        registry=DEFAULT_REGISTRY,
+        downloads=downloads,
+        refresh=args.refresh,
+        min_interval_seconds=args.delay_seconds,
+    )
+    print(result.manifest)
+    print(json.dumps(result.summary(), indent=2))
     return 0
 
 
@@ -124,6 +175,10 @@ def _reingest(args: argparse.Namespace) -> int:
 
     spec = DEFAULT_REGISTRY.get(args.dataset)
     ingester = INGESTERS[spec.producer]
+    # A replacement collection's manifests are replayed oldest first; the
+    # ingester must not measure an earlier, published selection against the
+    # newer snapshot it precedes (a refused one is still refused).
+    replay = {"replay": True} if spec.producer == "geomet_climate_hourly" else {}
     failures = 0
     for index, (raw_path, original_name, vintage, uri, fetched, _version) in enumerate(
         sources, 1
@@ -148,6 +203,7 @@ def _reingest(args: argparse.Namespace) -> int:
                     source_uri=uri,
                     publisher_vintage=vintage,
                     fetched_at=fetched,
+                    **replay,
                 )
             except Exception as error:  # noqa: BLE001 - report and continue
                 failures += 1
@@ -393,7 +449,15 @@ def _format_spec(spec, *, verbose: bool = False) -> str:
             window = ""
             if rule.start or rule.end:
                 window = f"  [{rule.start or '...'}, {rule.end or '...'})"
-            out += _field(str(rule.marker), f"{rule.meaning} -> {target}{window}", width=10)
+            # A blank marker (an empty field) would otherwise print as nothing.
+            marker = rule.marker if rule.marker.strip() else repr(rule.marker)
+            scope = ""
+            scoped = spec.ingest_options.get("sentinel_variables", {}).get(rule.marker)
+            if scoped is not None and set(scoped) != set(spec.variable_names):
+                scope = f"  (only {', '.join(scoped)})"
+            out += _field(
+                marker, f"{rule.meaning} -> {target}{window}{scope}", width=10
+            )
             if verbose and rule.evidence:
                 out += _field("", rule.evidence, indent="      ", width=8)
 
@@ -474,7 +538,62 @@ def parser() -> argparse.ArgumentParser:
         type=float,
         help="optional maximum gross drainage area for this ingestion run",
     )
+    ingest.add_argument(
+        "--allow-selection-shrink",
+        action="store_true",
+        help=(
+            "publish a GeoMet replacement snapshot that covers fewer stations "
+            "or hours than the published one"
+        ),
+    )
     ingest.set_defaults(handler=_ingest)
+    fetch = subparsers.add_parser(
+        "fetch",
+        help="download a publisher API selection and write its manifest",
+    )
+    fetch.add_argument("dataset")
+    fetch.add_argument(
+        "--station",
+        action="append",
+        required=True,
+        help="ECCC Climate ID; repeat for several stations",
+    )
+    fetch.add_argument(
+        "--start",
+        action="append",
+        required=True,
+        help="first local-standard-time day, YYYY-MM-DD (inclusive); repeatable",
+    )
+    fetch.add_argument(
+        "--end",
+        action="append",
+        required=True,
+        help="local-standard-time day after the last, YYYY-MM-DD (exclusive); "
+        "pairs with the --start in the same position",
+    )
+    fetch.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "re-request every response; without it only windows that could still "
+            "gain hours, or are not cached, are requested"
+        ),
+    )
+    fetch.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=geomet_acquisition.MIN_REQUEST_INTERVAL_SECONDS,
+        help=(
+            "pause between requests; at least "
+            f"{geomet_acquisition.MIN_REQUEST_INTERVAL_SECONDS:g} (the default)"
+        ),
+    )
+    fetch.add_argument(
+        "--downloads",
+        type=Path,
+        help="download cache directory (default <store>/downloads/<dataset>)",
+    )
+    fetch.set_defaults(handler=_fetch)
     reingest = subparsers.add_parser(
         "reingest",
         help="re-present every archived source of a dataset to its ingester",

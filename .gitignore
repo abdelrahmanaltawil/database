@@ -16,6 +16,7 @@ warehouse/
 staging/
 catalog/
 locks/
+downloads/
 *.duckdb
 *.parquet
 *.nc

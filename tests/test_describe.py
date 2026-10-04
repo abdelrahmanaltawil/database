@@ -139,6 +139,19 @@ def test_cli_verbose_adds_the_source_documentation(capsys) -> None:
     assert "Environment and Climate Change Canada" in verbose
 
 
+def test_cli_describe_shows_text_variables_annotations_and_index_units(capsys) -> None:
+    assert main(["describe", "eccc_climate_hourly_observations"]) == 0
+    out = capsys.readouterr().out
+    assert "weather_description" in out and "string" in out
+    assert "annotations" in out and "source_station_id" in out
+    humidex = next(line for line in out.splitlines() if line.strip().startswith("humidex "))
+    assert "  1  " in humidex
+    assert "'' " in out, "a blank sentinel marker must be visible"
+    assert "not_applicable -> null  (only wind_direction)" in out
+    assert "(only weather_description)" in out
+    assert "replace" in out
+
+
 def test_cli_unknown_dataset_fails_cleanly(capsys) -> None:
     assert main(["describe", "no_such_dataset"]) == 1
     assert "no_such_dataset" in capsys.readouterr().err
