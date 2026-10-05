@@ -9,7 +9,12 @@ import duckdb
 import pandas as pd
 
 from research_store.foundation.catalog import Catalog
-from research_store.foundation.models import Registry, StorageModel, TemporalKind
+from research_store.foundation.models import (
+    DatasetSpec,
+    Registry,
+    StorageModel,
+    TemporalKind,
+)
 from research_store.foundation.partitioning import entity_bucket
 from research_store.foundation.paths import resolve_store_paths
 from research_store.foundation.registry import DEFAULT_REGISTRY
@@ -105,23 +110,39 @@ def _logical_select(
         expressions = list(keys)
         for name in selected:
             literal = _sql_string(name)
+            occurrences = f"count(*) FILTER (WHERE variable = {literal})"
+            complaint = _sql_string(
+                f"{spec.dataset_id}.{name} holds more than one value for a single "
+                f"observation key; the store will not choose between them. Run "
+                f"'research-store doctor' and inspect the snapshot before reading."
+            )
+            # The writer refuses duplicate keys, so this can only fire if a
+            # snapshot was assembled outside the writer or a fragment was
+            # tampered with. Reporting it beats silently returning a maximum.
             expressions.append(
-                f"max(value) FILTER (WHERE variable = {literal}) AS {_identifier(name)}"
+                f"CASE WHEN {occurrences} > 1 THEN error({complaint}) "
+                f"ELSE max(value) FILTER (WHERE variable = {literal}) END "
+                f"AS {_identifier(name)}"
             )
             quality = spec.variable(name).quality_field
             if quality:
                 expressions.append(
-                    f"max(quality_flag) FILTER (WHERE variable = {literal}) "
+                    f"CASE WHEN {occurrences} > 1 THEN error({complaint}) "
+                    f"ELSE max(quality_flag) FILTER (WHERE variable = {literal}) END "
                     f"AS {_identifier(quality)}"
                 )
         if include_provenance:
-            expressions.extend(["_source_id", "_producer_run_id"])
-        group_keys = list(keys)
-        if include_provenance:
-            group_keys.extend(["_source_id", "_producer_run_id"])
+            # Aggregated rather than grouped: asking for provenance must not
+            # change how many rows the same request returns.
+            expressions.append(
+                "string_agg(DISTINCT _source_id, ',') AS _source_id"
+            )
+            expressions.append(
+                "string_agg(DISTINCT _producer_run_id, ',') AS _producer_run_id"
+            )
         return (
             f"SELECT {', '.join(expressions)} FROM {relation} "
-            f"GROUP BY {', '.join(group_keys)}"
+            f"GROUP BY {', '.join(keys)}"
         )
 
     expressions = list(keys)
@@ -130,9 +151,40 @@ def _logical_select(
         quality = spec.variable(name).quality_field
         if quality:
             expressions.append(_identifier(quality))
+    expressions.extend(_identifier(annotation.name) for annotation in spec.annotations)
     if include_provenance:
         expressions.extend(["_source_id", "_producer_run_id"])
     return f"SELECT {', '.join(expressions)} FROM {relation}"
+
+
+def describe(
+    dataset: str,
+    *,
+    registry: Registry = DEFAULT_REGISTRY,
+) -> DatasetSpec:
+    """Return the declared specification for one dataset.
+
+    The registry is the sole declaration site for dataset layout and semantics,
+    so this is the authoritative answer to what a dataset holds: its variables
+    with their quantities, units and dtypes, the quality field bound to each,
+    the entity and time fields, the timestamp semantics, the publisher sentinel
+    rules and the source documentation.
+
+    This is pure. It opens no store and touches no filesystem, so a consumer can
+    validate its configuration against the declaration before any store exists.
+    Snapshot identity is store-dependent and is reported by :func:`load` instead,
+    in ``frame.attrs["snapshot_id"]``.
+
+    Unlike :func:`load` this does not refuse a provisional dataset: why a dataset
+    is provisional is part of what it describes, in ``readiness`` and
+    ``unresolved_decisions``. Callers that intend to read data should still let
+    :func:`load` enforce readiness.
+
+    Raises:
+        KeyError: The dataset is not declared; the message lists what is.
+    """
+
+    return registry.get(dataset)
 
 
 def load(
@@ -144,6 +196,8 @@ def load(
     end: str | datetime | pd.Timestamp | None = None,
     snapshot: str | None = None,
     include_provenance: bool = False,
+    limit: int | None = None,
+    max_rows: int = 25_000_000,
     store: str | Path | None = None,
     registry: Registry = DEFAULT_REGISTRY,
 ) -> pd.DataFrame:
@@ -152,7 +206,14 @@ def load(
     `start` is inclusive and `end` is exclusive. Variables are returned as
     separate named columns, so quantities with different units never share a
     generic value column.
+
+    The result is materialised in memory, so a request wider than `max_rows`
+    is refused rather than attempted. Pass `limit` for a sample, raise
+    `max_rows` deliberately, or use `connect()` to query without materialising.
     """
+
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive")
 
     spec = registry.get(dataset)
     spec.require_ready()
@@ -168,9 +229,21 @@ def load(
         raise FileNotFoundError(f"Store catalogue does not exist: {paths.catalog}")
     catalog = Catalog(paths)
     filters = _partition_filter(spec, entities, start_at, end_at)
-    chosen_snapshot, fragments = catalog.committed_fragments(
-        dataset, snapshot, partition_filter=filters
+    chosen_snapshot, fragments, estimated_rows = catalog.committed_fragment_plan(
+        dataset,
+        snapshot,
+        partition_filter=filters,
+        start=start_at.to_pydatetime() if start_at is not None else None,
+        end=end_at.to_pydatetime() if end_at is not None else None,
     )
+    if limit is None and estimated_rows > max_rows:
+        raise ValueError(
+            f"Reading {dataset!r} would materialise about {estimated_rows:,} stored "
+            f"rows, above the {max_rows:,} row guard. Narrow the request with "
+            f"entity/start/end, pass limit= for a sample, raise max_rows if you "
+            f"mean it, or use research_store.connect() to query the fragments "
+            f"without materialising them."
+        )
     relation = _parquet_relation(fragments)
     logical = _logical_select(
         spec, relation, selected, include_provenance=include_provenance
@@ -195,6 +268,8 @@ def load(
     if spec.temporal_kind is not TemporalKind.REFERENCE:
         order.append(_identifier(spec.time_start_field))
     query = f"SELECT * FROM ({logical}) AS logical{where} ORDER BY {', '.join(order)}"
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
     with duckdb.connect() as connection:
         connection.execute("SET TimeZone = 'UTC'")
         frame = connection.execute(query, parameters).fetchdf()
@@ -208,6 +283,11 @@ def load(
             frame[variable_spec.quality_field] = frame[
                 variable_spec.quality_field
             ].astype("string")
+    for annotation in spec.annotations:
+        if annotation.dtype == "string":
+            frame[annotation.name] = frame[annotation.name].astype("string")
+        elif annotation.dtype == "float64":
+            frame[annotation.name] = frame[annotation.name].astype("float64")
     frame.attrs.update(
         {
             "dataset_id": dataset,
@@ -215,6 +295,8 @@ def load(
             "units": {name: spec.variable(name).unit for name in selected},
             "start_inclusive": True,
             "end_inclusive": False,
+            "fragments_read": len(fragments),
+            "row_limit": limit,
         }
     )
     return frame

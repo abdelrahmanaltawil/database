@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "research-data-store"
 version = "0.1.0"
-description = "A provenance-first ECCC climate research data store"
+description = "A provenance-first, multi-domain research data store"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Abdelrahman Altawil"}]
@@ -14,13 +14,24 @@ dependencies = [
   "numpy>=1.26",
   "openpyxl>=3.1",
   "pandas>=2.2",
-  "pyarrow>=17",
+  # Pinned exactly, not floated. A fragment's path is a digest of the
+  # Parquet file it was written to, and every file records its writer in
+  # the footer ("parquet-cpp-arrow version 25.0.1"). A different pyarrow
+  # therefore produces a different digest for identical rows, so a rebuild
+  # would land beside the path the catalogue holds instead of on it, and
+  # restore-from-raw would silently stop working. Change this only
+  # together with a plan for the fragments already published.
+  "pyarrow==25.0.1",
+  # DuckDB needs pytz to hand TIMESTAMPTZ values back to Python; without it
+  # any fetchall() over a timestamp column raises at runtime.
+  "pytz>=2024.1",
   "timezonefinder>=8.3,<9",
   "timezonefinder-data==1.2026.3",
   "tzdata==2026.3",
 ]
 
 [project.optional-dependencies]
+netcdf = ["xarray>=2024.7", "netcdf4>=1.7"]
 dev = ["pytest>=8.3", "pytest-cov>=5"]
 
 [project.scripts]

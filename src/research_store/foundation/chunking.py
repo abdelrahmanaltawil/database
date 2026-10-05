@@ -29,9 +29,11 @@ def chunks_from_frame(
             raise ValueError("Time-series dataset has no start field")
         frame = frame.copy()
         frame["__year"] = frame[spec.time_start_field].dt.year.astype(int)
-        frame["__entity_bucket"] = frame[spec.entity_field].map(
-            lambda value: entity_bucket(value, spec.entity_buckets)
-        )
+        bucket_by_entity = {
+            value: entity_bucket(value, spec.entity_buckets)
+            for value in frame[spec.entity_field].unique()
+        }
+        frame["__entity_bucket"] = frame[spec.entity_field].map(bucket_by_entity)
         groups = frame.groupby(["__year", "__entity_bucket"], sort=True, dropna=False)
 
     for group_key, group in groups:

@@ -38,36 +38,40 @@ def materialize(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     paths = paths or resolve_store_paths(for_write=True)
-    writer = StoreWriter(paths, registry)
-    run = writer.begin_derived(
-        spec,
-        input_fingerprint=fingerprint,
-        producer_version=producer_version,
-        parent_snapshot_ids=parent_snapshot_ids,
-    )
-    if run.state == "committed":
-        return run.snapshot_id
-    completed = writer.catalog.completed_chunk_keys(run.run_id)
-    try:
-        for chunk in chunks(completed):
-            if chunk.chunk_key in completed:
-                continue
-            writer.write_chunk(
+    with StoreWriter(paths, registry) as writer:
+        run = writer.resume_or_rebuild(
+            writer.begin_derived(
+                spec,
+                input_fingerprint=fingerprint,
+                producer_version=producer_version,
+                parent_snapshot_ids=parent_snapshot_ids,
+            )
+        )
+        if run.state == "committed":
+            return run.snapshot_id
+        completed = writer.catalog.completed_chunk_keys(run.run_id)
+        try:
+            for chunk in chunks(completed):
+                if chunk.chunk_key in completed:
+                    continue
+                writer.write_chunk(
+                    run=run,
+                    spec=spec,
+                    source=None,
+                    chunk_key=chunk.chunk_key,
+                    table=chunk.table,
+                    partition=chunk.partition,
+                )
+            return writer.publish(
                 run=run,
                 spec=spec,
                 source=None,
-                chunk_key=chunk.chunk_key,
-                table=chunk.table,
-                partition=chunk.partition,
+                parent_snapshot_ids=parent_snapshot_ids,
+                derivation_query=query,
+                producer_version=producer_version,
             )
-        return writer.publish(
-            run=run,
-            spec=spec,
-            source=None,
-            parent_snapshot_ids=parent_snapshot_ids,
-            derivation_query=query,
-            producer_version=producer_version,
-        )
-    except BaseException as error:
-        writer.catalog.mark_run_failed(run.run_id, repr(error), producer_kind="derived")
-        raise
+        except BaseException as error:
+            writer.catalog.mark_run_failed(
+                run.run_id, repr(error), producer_kind="derived"
+            )
+            raise

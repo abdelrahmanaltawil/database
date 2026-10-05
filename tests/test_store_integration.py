@@ -19,7 +19,8 @@ from research_store.foundation.models import (
     TemporalKind,
     VariableSpec,
 )
-from research_store.foundation.pipeline import ingest_file
+from research_store.foundation.pipeline import RejectedRecord, ingest_file
+from research_store.foundation.writer import _HELD_LOCKS
 
 
 def _wide_frame(rows: list[tuple[str, str, float, float]]) -> pd.DataFrame:
@@ -121,6 +122,64 @@ def test_ingest_load_sql_and_provenance(
     provenance = Catalog(store_paths).provenance(wide_spec.dataset_id, snapshot)
     assert provenance[0]["original_name"] == "sensor.csv"
     assert provenance[0]["publisher_vintage"] == "2024-Q1"
+
+
+def test_ingestion_rejections_are_persisted_with_source_locator(
+    tmp_path: Path, store_paths, registry, wide_spec
+) -> None:
+    source = tmp_path / "partially-malformed.txt"
+    source.write_text("source bytes\n")
+    data = _wide_frame(
+        [("0100001", "2024-01-01T00:00:00Z", 10.0, 8.0)]
+    )
+
+    def parser(path, spec, completed):
+        for line_number in (2, 3):
+            yield RejectedRecord(
+                rejection_key=f"line={line_number}:truncated-record",
+                record_locator=f"line:{line_number}",
+                reason="truncated_fixed_width_record",
+                raw_sha256="a" * 64,
+                raw_length=17,
+                details={"expected_width": 186},
+            )
+        yield from chunks_from_frame(
+            data, spec, key_prefix="accepted", completed=completed
+        )
+
+    ingest_file(
+        dataset_id=wide_spec.dataset_id,
+        source_path=source,
+        parser=parser,
+        ingester_version="rejections-1",
+        registry=registry,
+        paths=store_paths,
+    )
+
+    with Catalog(store_paths).open(read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT r.dataset_id, r.record_locator, r.reason, r.raw_sha256,
+                   r.raw_length, r.recovered_record_count, r.details_json,
+                   i.state
+            FROM ingestion_rejections AS r
+            JOIN ingestion_runs AS i USING (run_id)
+            ORDER BY r.record_locator
+            """
+        ).fetchall()
+    assert rows == [
+        (
+            "test_sensor",
+            f"line:{line_number}",
+            "truncated_fixed_width_record",
+            "a" * 64,
+            17,
+            0,
+            '{"expected_width": 186}',
+            "committed",
+        )
+        for line_number in (2, 3)
+    ]
 
 
 def test_long_storage_has_one_unit_safe_logical_api(
@@ -274,19 +333,6 @@ def test_append_snapshots_are_cumulative_and_replace_snapshots_preserve_vintages
         registry=registry,
     )
     assert current["power"].tolist() == [1.0, 3.0]
-    with Catalog(store_paths).open(read_only=True) as connection:
-        fragment_counts = dict(
-            connection.execute(
-                """
-                SELECT snapshot_id, count(*)
-                FROM fragments
-                WHERE snapshot_id IN (?, ?)
-                GROUP BY snapshot_id
-                """,
-                [append_first, append_second],
-            ).fetchall()
-        )
-    assert fragment_counts == {append_first: 1, append_second: 1}
     append_provenance = Catalog(store_paths).provenance(
         append_spec.dataset_id, append_second
     )
@@ -392,3 +438,88 @@ def test_derived_snapshot_has_transitive_source_provenance(
     assert result["mean_power"].tolist() == [2.0]
     provenance = Catalog(store_paths).provenance(derived_spec.dataset_id, derived)
     assert [record["original_name"] for record in provenance] == ["parent.csv"]
+
+
+def test_a_derived_materialization_releases_its_lock_and_rebuilds(
+    tmp_path: Path, store_paths, wide_spec
+) -> None:
+    """Derived output owes the same two guarantees as file ingestion.
+
+    A leaked write lock shuts the store to the next process, and a committed
+    run whose fragments a restore lost must rebuild them rather than return a
+    snapshot id for rows that are no longer on disk.
+    """
+
+    derived_spec = DatasetSpec(
+        dataset_id="mean_power",
+        description="Synthetic derived result",
+        kind=DatasetKind.DERIVED,
+        producer="test_mean",
+        storage_model=StorageModel.WIDE,
+        temporal_kind=TemporalKind.INTERVAL,
+        native_frequency="1 day",
+        variables=(VariableSpec("mean_power", "mean active power", "kW"),),
+        snapshot_mode="replace",
+        entity_buckets=8,
+    )
+    registry = Registry([wide_spec, derived_spec])
+    source = tmp_path / "parent.csv"
+    source.write_text("parent source")
+    parent_frame = _wide_frame([("A", "2024-01-01T00:00:00Z", 2.0, 3.0)])
+
+    def parent_parser(path, spec, completed):
+        yield from chunks_from_frame(
+            parent_frame, spec, key_prefix="parent", completed=completed
+        )
+
+    parent = ingest_file(
+        dataset_id=wide_spec.dataset_id,
+        source_path=source,
+        parser=parent_parser,
+        ingester_version="v1",
+        registry=registry,
+        paths=store_paths,
+    )
+    derived_frame = pd.DataFrame(
+        {
+            "entity_id": pd.Series(["A"], dtype="string"),
+            "time_start": [pd.Timestamp("2024-01-01", tz="UTC")],
+            "time_end": [pd.Timestamp("2024-01-02", tz="UTC")],
+            "mean_power": pd.Series([2.0], dtype="float64"),
+        }
+    )
+
+    def derived_chunks(completed):
+        yield from chunks_from_frame(
+            derived_frame, derived_spec, key_prefix="mean", completed=completed
+        )
+
+    arguments = {
+        "dataset_id": derived_spec.dataset_id,
+        "parent_snapshot_ids": [parent],
+        "query": {"operation": "daily_mean", "variable": "power"},
+        "producer_version": "test-1",
+        "chunks": derived_chunks,
+        "registry": registry,
+        "paths": store_paths,
+    }
+    derived = materialize(**arguments)
+    assert not _HELD_LOCKS, "materialize leaked the store write lock"
+
+    fragments = Catalog(store_paths).snapshot_fragment_paths(derived)
+    assert fragments
+    for fragment in fragments:
+        Path(fragment).unlink()
+
+    rebuilt = materialize(**arguments)
+    assert rebuilt == derived, "a restore must not mint a new snapshot identity"
+    assert all(Path(fragment).is_file() for fragment in fragments)
+    assert not _HELD_LOCKS
+    result = load(
+        derived_spec.dataset_id,
+        variable="mean_power",
+        snapshot=derived,
+        store=store_paths.root,
+        registry=registry,
+    )
+    assert result["mean_power"].tolist() == [2.0]

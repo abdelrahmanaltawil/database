@@ -105,6 +105,15 @@ def validate_table(table: pa.Table, spec: DatasetSpec) -> None:
                         f"{variable.quality_field} must be string, got {quality.type}"
                     )
 
+    for annotation in spec.annotations:
+        field = _require_field(table, annotation.name)
+        if annotation.dtype == "string" and not (
+            pa.types.is_string(field.type) or pa.types.is_large_string(field.type)
+        ):
+            raise TypeError(f"{annotation.name} must be string, got {field.type}")
+        if annotation.dtype == "float64" and not pa.types.is_float64(field.type):
+            raise TypeError(f"{annotation.name} must remain float64, got {field.type}")
+
     key_fields = {spec.entity_field}
     if spec.time_start_field:
         key_fields.add(spec.time_start_field)
@@ -124,6 +133,7 @@ def validate_table(table: pa.Table, spec: DatasetSpec) -> None:
             for variable in declared.values()
             if variable.quality_field
         )
+    allowed.update(annotation.name for annotation in spec.annotations)
     extra = set(table.column_names) - allowed
     if extra:
         raise ValueError(f"Columns not declared by the registry: {sorted(extra)}")
@@ -138,10 +148,10 @@ def validate_no_duplicate_observations(table: pa.Table, spec: DatasetSpec) -> No
             keys.append(spec.time_end_field)
         if spec.storage_model is StorageModel.LONG:
             keys.append("variable")
-    frame = table.select(keys).to_pandas()
-    duplicates = frame.duplicated(keep=False)
-    if duplicates.any():
-        sample = frame.loc[duplicates].head(3).to_dict(orient="records")
+    grouped = table.select(keys).group_by(keys).aggregate([([], "count_all")])
+    duplicates = grouped.filter(pc.greater(grouped["count_all"], 1))
+    if duplicates.num_rows:
+        sample = duplicates.select(keys).slice(0, 3).to_pylist()
         raise ValueError(
             f"Duplicate observation keys are not allowed; examples: {sample}"
         )

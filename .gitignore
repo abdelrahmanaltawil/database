@@ -10,11 +10,13 @@ build/
 .DS_Store
 
 # Research data must never be committed to the code repository.
+/ResearchDataStore/
 raw/
 warehouse/
 staging/
 catalog/
 locks/
+downloads/
 *.duckdb
 *.parquet
 *.nc

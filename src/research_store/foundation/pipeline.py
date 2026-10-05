@@ -19,7 +19,21 @@ class ParsedChunk:
     partition: dict[str, Any]
 
 
-Parser = Callable[[Path, DatasetSpec, set[str]], Iterable[ParsedChunk]]
+@dataclass(frozen=True, slots=True)
+class RejectedRecord:
+    """Auditable pointer to source bytes that were not published as observations."""
+
+    rejection_key: str
+    record_locator: str
+    reason: str
+    raw_sha256: str
+    raw_length: int
+    recovered_record_count: int = 0
+    details: dict[str, Any] | None = None
+
+
+ParsedEvent = ParsedChunk | RejectedRecord
+Parser = Callable[[Path, DatasetSpec, set[str]], Iterable[ParsedEvent]]
 
 
 def ingest_file(
@@ -39,30 +53,56 @@ def ingest_file(
     spec = registry.get(dataset_id)
     spec.require_ready()
     paths = paths or resolve_store_paths(for_write=True)
-    writer = StoreWriter(paths, registry)
-    asset = writer.archive_source(
-        Path(source_path),
-        source_uri=source_uri,
-        publisher_vintage=publisher_vintage,
-        fetched_at=fetched_at,
-    )
-    run = writer.begin(spec, asset, ingester_version=ingester_version)
-    if run.state == "committed":
-        return run.snapshot_id
-    completed = writer.catalog.completed_chunk_keys(run.run_id)
-    try:
-        for chunk in parser(asset.raw_path, spec, completed):
-            if chunk.chunk_key in completed:
-                continue
-            writer.write_chunk(
+    with StoreWriter(paths, registry) as writer:
+        asset = writer.archive_source(
+            Path(source_path),
+            source_uri=source_uri,
+            publisher_vintage=publisher_vintage,
+            fetched_at=fetched_at,
+        )
+        run = writer.resume_or_rebuild(
+            writer.begin(spec, asset, ingester_version=ingester_version)
+        )
+        if run.state == "committed":
+            return run.snapshot_id
+
+        completed = writer.catalog.completed_chunk_keys(run.run_id)
+        pending_rejections: list[RejectedRecord] = []
+
+        def flush_rejections() -> None:
+            if not pending_rejections:
+                return
+            writer.record_rejections(
                 run=run,
                 spec=spec,
                 source=asset,
-                chunk_key=chunk.chunk_key,
-                table=chunk.table,
-                partition=chunk.partition,
+                rejections=pending_rejections,
             )
-        return writer.publish(run=run, spec=spec, source=asset)
-    except BaseException as error:
-        writer.catalog.mark_run_failed(run.run_id, repr(error))
-        raise
+            pending_rejections.clear()
+
+        try:
+            for event in parser(asset.raw_path, spec, completed):
+                if isinstance(event, RejectedRecord):
+                    pending_rejections.append(event)
+                    if len(pending_rejections) >= 1_000:
+                        flush_rejections()
+                    continue
+                if event.chunk_key in completed:
+                    continue
+                writer.write_chunk(
+                    run=run,
+                    spec=spec,
+                    source=asset,
+                    chunk_key=event.chunk_key,
+                    table=event.table,
+                    partition=event.partition,
+                )
+            flush_rejections()
+            return writer.publish(run=run, spec=spec, source=asset)
+        except BaseException as error:
+            flush_rejections()
+            writer.catalog.mark_run_failed(run.run_id, repr(error))
+            # Staged fragments are deliberately kept so a transient failure can
+            # resume without re-parsing. `research-store gc` reclaims the space
+            # of runs that will never be resumed, and `doctor` reports them.
+            raise
