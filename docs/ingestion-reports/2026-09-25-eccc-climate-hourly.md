@@ -4,7 +4,13 @@
 
 **Complete for source accounting and publication on the live store. The
 dataset code, the registry correction and this report are committed together
-on the branch `feature/eccc-climate-hourly`.**
+as `979d171`, which `main` contains since the merge `c4f50a9` (2026-10-05).**
+
+> **Correction, 2026-10-06.** This report named its code by the branch
+> `feature/eccc-climate-hourly` and said the branch was not pushed. It was
+> pushed, merged into `main` by `c4f50a9` on 2026-10-05, and deleted, so the
+> code references now cite the commits `main` keeps: `4229b00` and `979d171`.
+> No result, identity or evidence changed.
 
 Times in this report are UTC unless marked LST or EDT. The live checks dated
 2026-10-04 here ran on the evening of 2026-10-03 EDT (UTC-4), the date the
@@ -28,9 +34,9 @@ forecasting repository's documents give them.
   failed, 0 missing, no problem.
 - **Committed afterwards:** the live run used the dataset's code as
   working-tree changes on top of `4229b00` (see Execution identity). That code,
-  the registry correction and this report were then committed together on the
-  branch `feature/eccc-climate-hourly`. Since the run, only the documentation in
-  `registry.py` changed, which no identity hash covers.
+  the registry correction and this report were then committed together as
+  `979d171`. Since the run, only the documentation in `registry.py` changed,
+  which no identity hash covers.
 - **Data quality is a separate question.** The values are the live National
   Climate Archive as served on 2026-09-25. They carry only automatic assessment
   (status R before 2013-12-10, Q from then on), ECCC can revise them, and flags
@@ -201,7 +207,7 @@ quarantined as `publisher_utc_mismatch`.
 | Publisher vintage | `MSC GeoMet climate-hourly (pygeoapi 0.20.0), retrieved 2026-09-25` | same string |
 | Fetch time | 2026-09-25T08:12:58Z, the newest retrieval in the manifest | same |
 | Source URI | `https://api.weather.gc.ca/collections/climate-hourly`; each response is archived with its own request URL and retrieval time | same |
-| Code | branch `feature/eccc-climate-hourly`, uncommitted when this draft was written | branch `feature/eccc-climate-hourly` at `4229b001bfe8e7a284c25dba3469f8ee59f4a3f3` (HEAD since 2026-09-25), **plus uncommitted working-tree changes that hold all of this dataset's code**: the new acquisition, ingester and station-time modules, the registry entry, the changes to the CLI, catalogue, models, paths and writer, and their tests. No commit contains the code the run used. Every file under `src/` except `foundation/registry.py` was last modified at or before 2026-09-25 08:05:07Z, before the scratch run committed (08:17:48Z), so none of them changed between the draft and the run. `foundation/registry.py` was last modified on 2026-10-04 at 03:49Z (2026-10-03 23:49 EDT) by the documentation corrections (Follow-up 2), so its modification time proves nothing about the run. For that file the proof is hash equality: the run's registry SHA-256 and dataset digest equal the scratch run's and the current file's. |
+| Code | branch `feature/eccc-climate-hourly`, uncommitted when this draft was written | commit `4229b001bfe8e7a284c25dba3469f8ee59f4a3f3`, the head of the branch `feature/eccc-climate-hourly` since 2026-09-25 (the branch was deleted after its merge into `main`, whose history keeps the commit), **plus uncommitted working-tree changes that hold all of this dataset's code**: the new acquisition, ingester and station-time modules, the registry entry, the changes to the CLI, catalogue, models, paths and writer, and their tests. No commit contained the code when the run used it; it was committed afterwards as `979d171` (Follow-up 1). Every file under `src/` except `foundation/registry.py` was last modified at or before 2026-09-25 08:05:07Z, before the scratch run committed (08:17:48Z), so none of them changed between the draft and the run. `foundation/registry.py` was last modified on 2026-10-04 at 03:49Z (2026-10-03 23:49 EDT) by the documentation corrections (Follow-up 2), so its modification time proves nothing about the run. For that file the proof is hash equality: the run's registry SHA-256 and dataset digest equal the scratch run's and the current file's. |
 
 Neither hash covers `DatasetSpec.documentation`, so a documentation-only
 registry correction (see Follow-up) changes neither of them. The corrections
@@ -762,8 +768,10 @@ live inputs differ from the scratch inputs. No live value differed.
 1. **Complete this report from the live run.** Done on 2026-10-04 (table
    above), the repeated ingest included. The live run used the dataset code
    as working-tree changes on top of `4229b00`; that code, the registry
-   correction and this report were then committed together on the branch
-   `feature/eccc-climate-hourly` (not pushed to GitHub).
+   correction and this report were then committed together as `979d171` on
+   the branch `feature/eccc-climate-hourly`. The branch was later pushed to
+   GitHub, merged into `main` by `c4f50a9` on 2026-10-05, and deleted; `main`
+   keeps both commits.
 2. **Correct the registry's limitations note.** Done on 2026-10-04 at 03:22Z
    (2026-10-03 23:22 EDT). Its blank-flag figures were corrected again later
    that day, to the split and the three hours given under Quality flags. The
