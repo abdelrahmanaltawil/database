@@ -49,6 +49,12 @@ keep a publisher's byte layout carries synthetic values.
 
 ## 3. Execute and inspect
 
+Run production ingestion only from committed code on `main`, and never with
+`--allow-uncommitted-code`. The writer refuses uncommitted code and records the
+commit on every run, so the report's Execution identity cites the commit that
+`research-store provenance DATASET --code` returns rather than reconstructing
+it from the working tree.
+
 Run the ingestion idempotently. Inspect committed and failed runs, snapshot
 state, source aliases, fragments and `ingestion_rejections`. A quarantined line
 must retain a source identifier, locator, reason and raw hash; partial recovery

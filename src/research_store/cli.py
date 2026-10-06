@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import textwrap
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from research_store.access.api import connect, describe, load
 from research_store.acquisition import geomet_climate_hourly as geomet_acquisition
+from research_store.foundation import code_version
 from research_store.foundation.catalog import Catalog
 from research_store.foundation.maintenance import (
     collect_garbage,
@@ -101,6 +103,7 @@ def _ingest(args: argparse.Namespace) -> int:
     spec = DEFAULT_REGISTRY.get(args.dataset)
     ingester = INGESTERS[spec.producer]
     extra = _producer_options(spec, args)
+    code_version.code_version_for_write()
     print(f"ingesting {args.source} ...", file=sys.stderr, flush=True)
     snapshot = ingester(
         args.dataset,
@@ -121,6 +124,7 @@ def _ingest_directory(args: argparse.Namespace) -> int:
     spec = DEFAULT_REGISTRY.get(args.dataset)
     ingester = INGESTERS[spec.producer]
     extra = _producer_options(spec, args)
+    code_version.code_version_for_write()
     directory = args.directory.expanduser().resolve(strict=True)
     if not directory.is_dir():
         raise ValueError(f"Source is not a directory: {directory}")
@@ -199,7 +203,6 @@ def _reingest(args: argparse.Namespace) -> int:
     content digest.
     """
 
-    import os
     import shutil
     import tempfile
 
@@ -215,6 +218,8 @@ def _reingest(args: argparse.Namespace) -> int:
         print("note: nothing was ingested; re-run without --dry-run")
         return 0
 
+    # Refuse once here rather than once for every archived source below.
+    code_version.code_version_for_write()
     spec = DEFAULT_REGISTRY.get(args.dataset)
     ingester = INGESTERS[spec.producer]
     # A replacement collection's manifests are replayed oldest first; the
@@ -260,7 +265,11 @@ def _reingest(args: argparse.Namespace) -> int:
 
 
 def _provenance(args: argparse.Namespace) -> int:
-    records = Catalog(_paths(args)).provenance(args.dataset, args.snapshot)
+    catalog = Catalog(_paths(args))
+    if args.code:
+        records = catalog.code_versions(args.dataset, args.snapshot)
+    else:
+        records = catalog.provenance(args.dataset, args.snapshot)
     print(json.dumps(records, indent=2, default=str))
     return 0
 
@@ -658,11 +667,26 @@ def parser() -> argparse.ArgumentParser:
         help="stop at the first failure instead of continuing",
     )
     reingest.set_defaults(handler=_reingest)
+    for command in (ingest, ingest_directory, reingest):
+        command.add_argument(
+            "--allow-uncommitted-code",
+            action="store_true",
+            help=(
+                "write even though the code is not exactly a git commit; the "
+                "uncommitted paths are recorded with each run (development and "
+                "scratch stores only)"
+            ),
+        )
     provenance = subparsers.add_parser(
         "provenance", help="resolve sources for a snapshot"
     )
     provenance.add_argument("dataset")
     provenance.add_argument("--snapshot")
+    provenance.add_argument(
+        "--code",
+        action="store_true",
+        help="list the code commit that wrote each run the snapshot reads",
+    )
     provenance.set_defaults(handler=_provenance)
     sql = subparsers.add_parser("sql", help="run read-only DuckDB SQL")
     sql.add_argument("query", nargs="?")
@@ -719,8 +743,23 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _allow_uncommitted_code() -> None:
+    """Honour --allow-uncommitted-code for every writer this process opens."""
+
+    os.environ[code_version.ALLOW_UNCOMMITTED_ENV] = "1"
+    version = code_version.current_code_version()
+    if not version.committed:
+        print(
+            f"warning: writing from {version.describe()}; this is recorded "
+            f"with each run",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if getattr(args, "allow_uncommitted_code", False):
+        _allow_uncommitted_code()
     try:
         return int(args.handler(args))
     except (

@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 
 from research_store import load
-from research_store.foundation.catalog import Catalog
+from research_store.foundation.catalog import SCHEMA_VERSION, Catalog
 from research_store.foundation.chunking import chunks_from_frame
 from research_store.foundation.maintenance import (
     collect_garbage,
@@ -675,7 +675,7 @@ def test_schema_migration_keeps_repeated_identities_apart(
         "the surviving publication claims the real identity"
     )
     assert rows["run_failed"].startswith("superseded-identity:")
-    assert catalog.get_meta("schema_version") == "2"
+    assert catalog.get_meta("schema_version") == str(SCHEMA_VERSION)
 
 
 def test_an_interrupted_schema_migration_is_undone_and_retried(

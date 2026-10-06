@@ -341,6 +341,24 @@ Append datasets inherit the preceding committed fragment manifest. Replacement
 datasets, such as a refreshed whole-archive delivery, create an independent
 snapshot. Old snapshots remain queryable by ID.
 
+### Which code wrote a run
+
+Every time a run starts writing (when it starts, when a failed or interrupted
+run resumes, and when a committed run is rebuilt) the writer records the git
+commit of the installed `research_store` package in `run_code_versions`. The
+record also lists any path in the package or `pyproject.toml` that differs from
+that commit. The commit is a record, not part of run identity, so a new commit
+never re-keys a finished run or turns a re-ingest into new work.
+
+A writer refuses to open when that code is not exactly a commit: uncommitted
+edits, untracked modules, or an installation that is not a git checkout. The
+refusal happens before any source is archived, so it leaves nothing behind.
+`--allow-uncommitted-code`, or `RESEARCH_STORE_ALLOW_UNCOMMITTED_CODE=1`, lifts
+the refusal for development and scratch stores, and the uncommitted paths are
+then recorded with each run. `research-store provenance DATASET --code` follows
+a snapshot's fragments back to every run that wrote them, so an append snapshot
+reports the code of each run it inherited, not only its own.
+
 ### Correcting published data
 
 An append cannot fix a value that was wrong when it was published; it would sit
@@ -358,7 +376,7 @@ fragment. Recording evidence is not the same as checking it:
 
 | Command | What it does |
 |---|---|
-| `research-store doctor` | Missing fragments, absolute paths, legacy layout, abandoned staging, runs stuck running, retired datasets, unreferenced files, declared-but-empty datasets |
+| `research-store doctor` | Missing fragments, absolute paths, legacy layout, abandoned staging, runs stuck running, runs written from uncommitted code, retired datasets, unreferenced files, declared-but-empty datasets |
 | `research-store doctor --verify-sample N` / `--verify-all` | Re-hashes published fragments against their recorded digest |
 | `research-store gc [--apply]` | Reclaims staging of runs that will not resume, and fragments no snapshot references |
 | `research-store migrate [--apply]` | Moves an older store onto this layout; resumable with `--budget-seconds` |

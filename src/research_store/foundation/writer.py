@@ -17,6 +17,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from research_store.foundation import code_version
 from research_store.foundation.catalog import Catalog, RunRecord
 from research_store.foundation.hashing import sha256_file
 from research_store.foundation.models import (
@@ -109,6 +110,9 @@ class StoreWriter:
     """The only code path allowed to mutate raw, warehouse, or catalogue state."""
 
     def __init__(self, paths: StorePaths, registry: Registry, *, lock: bool = True):
+        # Refused before anything is archived, staged or catalogued, so code
+        # that no commit holds leaves nothing behind.
+        self.code = code_version.code_version_for_write()
         self.paths = paths
         self.registry = registry
         paths.create()
@@ -228,12 +232,14 @@ class StoreWriter:
         ingester_version: str,
     ) -> RunRecord:
         spec.require_ready()
-        return self.catalog.begin_or_resume_run(
-            dataset_id=spec.dataset_id,
-            source_id=source.source_id,
-            ingester_version=ingester_version,
-            registry_hash=self.registry.digest,
-            dataset_digest=spec.identity_digest,
+        return self._record_code(
+            self.catalog.begin_or_resume_run(
+                dataset_id=spec.dataset_id,
+                source_id=source.source_id,
+                ingester_version=ingester_version,
+                registry_hash=self.registry.digest,
+                dataset_digest=spec.identity_digest,
+            )
         )
 
     def begin_derived(
@@ -247,13 +253,34 @@ class StoreWriter:
         spec.require_ready()
         if spec.kind is not DatasetKind.DERIVED:
             raise ValueError(f"Dataset {spec.dataset_id!r} is not declared as derived")
-        return self.catalog.begin_or_resume_derivation(
-            dataset_id=spec.dataset_id,
-            input_fingerprint=input_fingerprint,
-            producer_version=producer_version,
-            registry_hash=self.registry.digest,
-            parent_snapshot_ids=parent_snapshot_ids,
+        return self._record_code(
+            self.catalog.begin_or_resume_derivation(
+                dataset_id=spec.dataset_id,
+                input_fingerprint=input_fingerprint,
+                producer_version=producer_version,
+                registry_hash=self.registry.digest,
+                parent_snapshot_ids=parent_snapshot_ids,
+            )
         )
+
+    def _record_code(self, run: RunRecord, attempt: str | None = None) -> RunRecord:
+        """Record which code writes `run`, if it is about to write at all.
+
+        A committed run returned for an idempotent re-ingest writes nothing,
+        so it records nothing; its fragments carry the code that wrote them.
+        """
+
+        if attempt is None:
+            if run.state == "committed":
+                return run
+            attempt = "resume" if run.resumed else "start"
+        self.catalog.record_run_code(
+            run_id=run.run_id,
+            attempt=attempt,
+            code_commit=self.code.commit,
+            uncommitted=self.code.uncommitted,
+        )
+        return run
 
     def resume_or_rebuild(self, run: RunRecord) -> RunRecord:
         """Return a run ready to write, rebuilding one whose fragments are gone.
@@ -279,7 +306,9 @@ class StoreWriter:
         # the restored catalogue and the rebuilt warehouse still describe each
         # other.
         self.catalog.reset_run_for_rebuild(run.run_id)
-        return dataclasses.replace(run, state="running")
+        return self._record_code(
+            dataclasses.replace(run, state="running"), attempt="rebuild"
+        )
 
     # ------------------------------------------------------------------
     # Fragment paths

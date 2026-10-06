@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from research_store.foundation.code_version import ALLOW_UNCOMMITTED_ENV
 from research_store.foundation.models import (
     DatasetKind,
     DatasetSpec,
@@ -13,6 +14,16 @@ from research_store.foundation.models import (
     VariableSpec,
 )
 from research_store.foundation.paths import StorePaths
+
+
+@pytest.fixture(autouse=True)
+def allow_uncommitted_code(monkeypatch) -> None:
+    """Tests write throwaway stores from a working tree that is often dirty.
+
+    tests/test_code_version.py removes this to test the refusal itself.
+    """
+
+    monkeypatch.setenv(ALLOW_UNCOMMITTED_ENV, "1")
 
 
 @pytest.fixture
