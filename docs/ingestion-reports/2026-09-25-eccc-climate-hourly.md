@@ -6,6 +6,12 @@
 dataset code, the registry correction and this report are committed together
 as `979d171`, which `main` contains since the merge `c4f50a9` (2026-10-05).**
 
+> **Correction, 2026-10-06.** This report named its code by the branch
+> `feature/eccc-climate-hourly` and said the branch was not pushed. It was
+> pushed, merged into `main` by `c4f50a9` on 2026-10-05, and deleted, so the
+> code references now cite the commits `main` keeps: `4229b00` and `979d171`.
+> No result, identity or evidence changed.
+
 Times in this report are UTC unless marked LST or EDT. The live checks dated
 2026-10-04 here ran on the evening of 2026-10-03 EDT (UTC-4), the date the
 forecasting repository's documents give them.
