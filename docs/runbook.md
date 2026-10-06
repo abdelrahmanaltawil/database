@@ -58,6 +58,11 @@ Sources with unresolved time, unit or licensed-schema decisions report
 `provisional`; this is an intentional stop condition, not an installation
 failure.
 
+A catalogue created before code versions were recorded (schema 2) makes
+`doctor` report `schema_behind`. `research-store init`, or the next ingest,
+adds the `run_code_versions` table; nothing else changes. Runs published before
+then have no code record.
+
 ### Upgrading a store created before 2026-08-31
 
 Older stores filed fragments under `warehouse/<tier>/<dataset>/snapshots/<id>/`
@@ -155,6 +160,20 @@ clock times that only the historical inspection reports carry. Restrict a file
 to confirmed 24-hour stations with `entity_allowlist` when it mixes both.
 
 ## 6. Ingest immutable sources
+
+Commit the code first. Every write records the git commit of the installed
+package, and `ingest`, `ingest-directory` and `reingest` refuse to run while the
+package or `pyproject.toml` has uncommitted changes or untracked files:
+
+```text
+error: Refusing to write to the store from commit 4229b00… plus uncommitted
+changes to src/research_store/ingestion/geomet_climate_hourly.py, …
+```
+
+Edits to docs, tests or notebooks do not count. For development or a scratch
+store, `--allow-uncommitted-code` (or `RESEARCH_STORE_ALLOW_UNCOMMITTED_CODE=1`)
+writes anyway and records the uncommitted paths with each run; never use it for
+production ingestion.
 
 All source formats use the same command. Examples:
 
@@ -459,12 +478,18 @@ to be wrong.
 
 ```bash
 research-store provenance eccc_hly01_observations
+research-store provenance eccc_hly01_observations --code
 
 research-store benchmark eccc_hly01_observations \
   --entity '0100001' \
   --year 2019 \
   --variable precipitation_amount_1h
 ```
+
+`--code` lists every run whose fragments the snapshot reads, with the commit
+that wrote it and any uncommitted paths; an append snapshot lists the runs it
+inherited too. Cite that commit in a report's Execution identity. Runs written
+before code versions were recorded show no commit.
 
 Record benchmark JSON when changing entity bucket counts or fragment sizes.
 

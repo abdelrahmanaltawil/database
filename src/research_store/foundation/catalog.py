@@ -13,7 +13,7 @@ import duckdb
 from research_store.foundation.models import Registry
 from research_store.foundation.paths import StorePaths
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS datasets (
@@ -83,6 +83,21 @@ CREATE TABLE IF NOT EXISTS derivation_runs (
     completed_at TIMESTAMPTZ,
     error VARCHAR,
     UNIQUE (dataset_id, input_fingerprint, producer_version, registry_hash)
+);
+
+-- The code that wrote each ingestion or derivation run: one row each time a
+-- run starts writing, which is when it starts, when an interrupted or failed
+-- run resumes, and when a committed run is rebuilt into its own snapshot.
+-- It is a record, not part of run identity, so a new commit never re-keys a
+-- run. code_commit is NULL when the code was not a git checkout.
+-- uncommitted_json lists the paths that differed from that commit, is '[]'
+-- when none did, and is NULL when that could not be determined.
+CREATE TABLE IF NOT EXISTS run_code_versions (
+    run_id VARCHAR NOT NULL,
+    attempt VARCHAR NOT NULL,
+    code_commit VARCHAR,
+    uncommitted_json VARCHAR,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT current_timestamp
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_chunks (
@@ -590,6 +605,29 @@ class Catalog:
             )
             return RunRecord(run_id, snapshot_id, "running", resumed=False)
 
+    def record_run_code(
+        self,
+        *,
+        run_id: str,
+        attempt: str,
+        code_commit: str | None,
+        uncommitted: tuple[str, ...] | None,
+    ) -> None:
+        with self.open() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_code_versions
+                (run_id, attempt, code_commit, uncommitted_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    run_id,
+                    attempt,
+                    code_commit,
+                    None if uncommitted is None else json.dumps(list(uncommitted)),
+                ],
+            )
+
     def completed_chunk_keys(self, run_id: str) -> set[str]:
         with self.open(read_only=True) as connection:
             rows = connection.execute(
@@ -1031,6 +1069,89 @@ class Catalog:
             columns = [item[0] for item in result.description]
             return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
+    def code_versions(
+        self, dataset_id: str, snapshot_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The code that wrote every run whose fragments a snapshot reads.
+
+        An append snapshot reads fragments that earlier runs wrote, and a
+        derived one reads its parents, so this follows the fragments back to
+        their runs rather than reporting only the snapshot's own run. A run
+        written before code versions were recorded appears once, with every
+        code field None.
+        """
+
+        chosen, _ = self.committed_fragments(dataset_id, snapshot_id)
+        with self.open(read_only=True) as connection:
+            recorded = "run_code_versions" in {
+                row[0]
+                for row in connection.execute(
+                    "SELECT table_name FROM information_schema.tables"
+                ).fetchall()
+            }
+            code_table = (
+                "run_code_versions"
+                if recorded
+                # A catalogue that no writer has opened since the table was
+                # added; reading must not create it.
+                else "(SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS attempt, "
+                "NULL::VARCHAR AS code_commit, NULL::VARCHAR AS uncommitted_json, "
+                "NULL::TIMESTAMPTZ AS recorded_at WHERE false)"
+            )
+            result = connection.execute(
+                f"""
+                WITH RECURSIVE lineage(snapshot_id) AS (
+                    SELECT ?
+                    UNION
+                    SELECT edge.parent_snapshot_id
+                    FROM derivation_edges edge
+                    JOIN lineage current
+                      ON edge.child_snapshot_id = current.snapshot_id
+                )
+                , writers AS (
+                    SELECT DISTINCT chunk.run_id
+                    FROM fragments AS fragment
+                    JOIN lineage USING (snapshot_id)
+                    JOIN ingestion_chunks AS chunk
+                      ON chunk.relative_path = fragment.relative_path
+                )
+                , runs AS (
+                    SELECT run_id, dataset_id, snapshot_id, source_id
+                    FROM ingestion_runs
+                    UNION ALL
+                    SELECT run_id, dataset_id, snapshot_id, NULL AS source_id
+                    FROM derivation_runs
+                )
+                -- The name archived_sources replays a source under: a
+                -- publisher filename before a content digest, then the first.
+                , names AS (
+                    SELECT source_id, original_name
+                    FROM source_aliases
+                    QUALIFY row_number() OVER (
+                        PARTITION BY source_id
+                        ORDER BY regexp_matches(original_name, '^[0-9a-f]{{32,}}$'),
+                                 recorded_at
+                    ) = 1
+                )
+                SELECT run.run_id, run.dataset_id, run.snapshot_id, run.source_id,
+                       name.original_name AS source_name,
+                       code.attempt, code.code_commit, code.uncommitted_json,
+                       code.recorded_at
+                FROM writers
+                JOIN runs AS run USING (run_id)
+                LEFT JOIN names AS name ON name.source_id = run.source_id
+                LEFT JOIN {code_table} AS code USING (run_id)
+                ORDER BY code.recorded_at NULLS FIRST, source_name, run.run_id
+                """,
+                [chosen],
+            )
+            columns = [item[0] for item in result.description]
+            rows = [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+        for row in rows:
+            listed = row.pop("uncommitted_json")
+            row["uncommitted"] = None if listed is None else json.loads(listed)
+        return rows
+
     # ------------------------------------------------------------------
     # Correction, recovery and maintenance
     # ------------------------------------------------------------------
@@ -1295,6 +1416,50 @@ class Catalog:
                 """,
                 list(states),
             ).fetchall()
+
+    def run_code_summary(self) -> dict[str, int] | None:
+        """Committed runs counted by what is known of the code that wrote them.
+
+        None when the catalogue predates code-version records; doctor reports
+        that as a schema behind its code.
+        """
+
+        with self.open(read_only=True) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT table_name FROM information_schema.tables"
+                ).fetchall()
+            }
+            if "run_code_versions" not in tables:
+                return None
+            total, unrecorded, uncommitted = connection.execute(
+                """
+                WITH committed AS (
+                    SELECT run_id FROM ingestion_runs WHERE state = 'committed'
+                    UNION ALL
+                    SELECT run_id FROM derivation_runs WHERE state = 'committed'
+                )
+                SELECT
+                    count(*),
+                    count(*) FILTER (WHERE NOT EXISTS (
+                        SELECT 1 FROM run_code_versions AS code
+                        WHERE code.run_id = committed.run_id
+                    )),
+                    count(*) FILTER (WHERE EXISTS (
+                        SELECT 1 FROM run_code_versions AS code
+                        WHERE code.run_id = committed.run_id
+                          AND (code.code_commit IS NULL
+                               OR code.uncommitted_json IS DISTINCT FROM '[]')
+                    ))
+                FROM committed
+                """
+            ).fetchone()
+        return {
+            "committed_runs": total,
+            "runs_without_code_record": unrecorded,
+            "runs_with_uncommitted_code": uncommitted,
+        }
 
     def forget_run(self, run_id: str) -> None:
         """Drop the staged bookkeeping of a run that will never be resumed."""

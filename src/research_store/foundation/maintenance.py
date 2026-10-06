@@ -324,6 +324,21 @@ def diagnose(
             )
         )
 
+    code = catalog.run_code_summary()
+    if code is not None:
+        facts.update(code)
+        if code["runs_with_uncommitted_code"]:
+            findings.append(
+                Finding(
+                    "note",
+                    "uncommitted_code_runs",
+                    f"{code['runs_with_uncommitted_code']} committed runs were "
+                    f"written, at least in part, from code that no commit holds "
+                    f"(--allow-uncommitted-code); `research-store provenance "
+                    f"--code` shows which",
+                )
+            )
+
     legacy_failed = paths.root / LEGACY_FAILED_RUNS
     if legacy_failed.is_dir():
         findings.append(
