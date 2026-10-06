@@ -8,8 +8,13 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request makes its older run moot, so runs of one pull
+# request share a group and the older is cancelled. A push to main gets a group
+# of its own commit: merging pull requests in a row must leave every commit on
+# main with its own result, and a shared group would cancel or drop all but
+# the newest.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
